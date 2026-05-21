@@ -288,6 +288,77 @@ assert_empty "$OUT" "T20: clean system produces empty output"
 teardown_fixture
 
 # ============================================================================
+# Slash-containing relative path tests (PATH search applies only to no-slash names)
+# ============================================================================
+
+# T21: Slash-containing relative command → NO RELATIVE_CMD[root]
+setup_fixture
+cat > "$TESTDIR/etc/crontab" <<EOF
+PATH=/usr/local/bin:/usr/bin
+* * * * * root ./overwrite.sh
+* * * * * root sub/overwrite.sh
+EOF
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_not_contains "$OUT" "RELATIVE_CMD[root]: ./overwrite.sh" "T21a: leading-dot slash relative not flagged"
+assert_not_contains "$OUT" "RELATIVE_CMD[root]: sub/overwrite.sh" "T21b: mid-slash relative not flagged"
+teardown_fixture
+
+# ============================================================================
+# @-string schedule tests (@hourly/@daily/@reboot: user=field 2, command=field 3)
+# ============================================================================
+
+# T22a: @-string relative command → RELATIVE_CMD[root] (RELATIVE_CMD block @-parse)
+setup_fixture
+cat > "$TESTDIR/etc/crontab" <<EOF
+PATH=/usr/local/bin:/usr/bin
+@hourly root atstring_cmd.sh
+EOF
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "RELATIVE_CMD[root]: atstring_cmd.sh" "T22a: @hourly relative command detected"
+teardown_fixture
+
+# T22b: @reboot writable absolute script → WRITABLE_SCRIPT[root] (absolute-token block @-parse; confirms @reboot surfaced)
+setup_fixture
+touch "$TESTDIR/scripts/reboot_writable.sh"
+chmod +w "$TESTDIR/scripts/reboot_writable.sh"
+echo "@reboot root $TESTDIR/scripts/reboot_writable.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WRITABLE_SCRIPT[root]: $TESTDIR/scripts/reboot_writable.sh" "T22b: @reboot writable script surfaced"
+teardown_fixture
+
+# T22c: @-string inline wildcard → WILDCARD[root] (WILDCARD block @-parse)
+setup_fixture
+echo "@daily root tar czf /backup.tar.gz /home/*" > "$TESTDIR/etc/cron.d/atstring_tar"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]:" "T22c: @daily inline wildcard detected"
+teardown_fixture
+
+# T22d: Non-root @-string entry → NO output (root filter still applies under @-parse)
+setup_fixture
+touch "$TESTDIR/scripts/atstring_nonroot.sh"
+chmod +w "$TESTDIR/scripts/atstring_nonroot.sh"
+echo "@hourly www-data $TESTDIR/scripts/atstring_nonroot.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_not_contains "$OUT" "WRITABLE_SCRIPT[root]:" "T22d: non-root @-string entry not flagged"
+teardown_fixture
+
+# ============================================================================
+# Missing /etc/crontab (cron.d-only) test — guards mawk abort on absent first file
+# ============================================================================
+
+# T23: cron.d entry with NO /etc/crontab present → still detected
+# (Pre-fix: mawk aborts on the missing crontab arg before reading cron.d. Fails only
+#  on mawk hosts; gawk skips missing files silently. Kali/Ubuntu default to mawk.)
+setup_fixture
+cat > "$TESTDIR/etc/cron.d/cronD_only" <<EOF
+PATH=/usr/local/bin:/usr/bin
+* * * * * root crondonly_cmd.sh
+EOF
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "RELATIVE_CMD[root]: crondonly_cmd.sh" "T23: cron.d-only entry detected without /etc/crontab"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 
