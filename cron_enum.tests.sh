@@ -359,6 +359,145 @@ assert_contains "$OUT" "RELATIVE_CMD[root]: crondonly_cmd.sh" "T23: cron.d-only 
 teardown_fixture
 
 # ============================================================================
+# Expansion-directory resolution tests (WILDCARD marker: <dir>:<file>:<line>:<body>)
+# ============================================================================
+
+# T24a: cd on a PRIOR script line (not the hit line) → dir resolved from it (THM shape)
+setup_fixture
+cat > "$TESTDIR/scripts/compress.sh" <<'EOF'
+#!/bin/sh
+cd /home/user
+tar czf /tmp/backup.tar.gz *
+EOF
+chmod +x "$TESTDIR/scripts/compress.sh"
+echo "* * * * * root $TESTDIR/scripts/compress.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: /home/user:" "T24a: dir resolved from prior-line cd in script"
+teardown_fixture
+
+# T24b: inline cd in same command (cd /x && tar *) → dir = /x
+setup_fixture
+echo "* * * * * root cd /var/backups && tar czf /b.tgz *" > "$TESTDIR/etc/cron.d/inline_cd"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: /var/backups:" "T24b: dir resolved from inline cd in cron line"
+teardown_fixture
+
+# T24c: no governing cd → dir = root's HOME (WILDCARD entries are root-only)
+setup_fixture
+echo "* * * * * root tar czf /b.tgz /home/*" > "$TESTDIR/etc/cron.d/no_cd"
+RH=$(awk -F: '$1=="root"{print $6; exit}' /etc/passwd); RH=${RH:-/root}
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: $RH:" "T24c: no-cd hit falls back to root HOME"
+teardown_fixture
+
+# T24d: variable/computed cd target → UNRESOLVED (no silent wrong path)
+setup_fixture
+cat > "$TESTDIR/scripts/var_cd.sh" <<'EOF'
+#!/bin/sh
+cd $BACKUP_DIR
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/scripts/var_cd.sh"
+echo "* * * * * root $TESTDIR/scripts/var_cd.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: UNRESOLVED:" "T24d: variable cd target emits UNRESOLVED"
+teardown_fixture
+
+# T24e: substring trap — 'abcd /trap' must NOT be read as a cd; falls back to root HOME
+setup_fixture
+cat > "$TESTDIR/scripts/trap_cd.sh" <<'EOF'
+#!/bin/sh
+echo abcd /trap
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/scripts/trap_cd.sh"
+echo "* * * * * root $TESTDIR/scripts/trap_cd.sh" > "$TESTDIR/etc/crontab"
+RH=$(awk -F: '$1=="root"{print $6; exit}' /etc/passwd); RH=${RH:-/root}
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_not_contains "$OUT" ": /trap:" "T24e: 'abcd /trap' substring not parsed as cd target"
+assert_contains "$OUT" "WILDCARD[root]: $RH:" "T24e: trap line falls back to root HOME"
+teardown_fixture
+
+# T24f: absolute then RELATIVE cd → appended (cd /a; cd b → /a/b), not last-token 'b'
+setup_fixture
+cat > "$TESTDIR/scripts/abs_rel.sh" <<'EOF'
+#!/bin/sh
+cd /a
+cd b
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/scripts/abs_rel.sh"
+echo "* * * * * root $TESTDIR/scripts/abs_rel.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: /a/b:" "T24f: absolute then relative cd replayed to /a/b"
+teardown_fixture
+
+# T24g: '..' lexically normalised (cd /a/b; cd .. → /a)
+setup_fixture
+cat > "$TESTDIR/scripts/dotdot.sh" <<'EOF'
+#!/bin/sh
+cd /a/b
+cd ..
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/scripts/dotdot.sh"
+echo "* * * * * root $TESTDIR/scripts/dotdot.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: /a:" "T24g: cd .. normalised to /a"
+teardown_fixture
+
+# T24h: relative-first cd (no absolute anchor) → resolved against initial cwd = root HOME
+setup_fixture
+cat > "$TESTDIR/scripts/rel_first.sh" <<'EOF'
+#!/bin/sh
+cd backup
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/scripts/rel_first.sh"
+echo "* * * * * root $TESTDIR/scripts/rel_first.sh" > "$TESTDIR/etc/crontab"
+RH=$(awk -F: '$1=="root"{print $6; exit}' /etc/passwd); RH=${RH:-/root}
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: $RH/backup:" "T24h: relative-first cd anchored at root HOME"
+teardown_fixture
+
+# T24i: run-parts script, no cd → UNRESOLVED (initial cwd is wrapper-dependent, not root HOME)
+setup_fixture
+cat > "$TESTDIR/etc/cron.daily/rp_nocd" <<'EOF'
+#!/bin/sh
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/etc/cron.daily/rp_nocd"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: UNRESOLVED:" "T24i: run-parts no-cd is UNRESOLVED"
+teardown_fixture
+
+# T24j: run-parts script WITH an absolute cd → resolves (absolute resets unknown base)
+setup_fixture
+cat > "$TESTDIR/etc/cron.daily/rp_abs" <<'EOF'
+#!/bin/sh
+cd /srv/data
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/etc/cron.daily/rp_abs"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: /srv/data:" "T24j: run-parts absolute cd resolves"
+teardown_fixture
+
+# T24k: variable cd then absolute cd → absolute re-anchors (→ /b, not UNRESOLVED)
+setup_fixture
+cat > "$TESTDIR/scripts/var_abs.sh" <<'EOF'
+#!/bin/sh
+cd $BACKUP
+cd /b
+tar czf /tmp/b.tgz *
+EOF
+chmod +x "$TESTDIR/scripts/var_abs.sh"
+echo "* * * * * root $TESTDIR/scripts/var_abs.sh" > "$TESTDIR/etc/crontab"
+OUT=$("$TESTDIR/cron_enum.sh")
+assert_contains "$OUT" "WILDCARD[root]: /b:" "T24k: variable then absolute cd re-anchors to /b"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 
