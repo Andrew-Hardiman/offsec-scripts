@@ -1,7 +1,7 @@
 #!/bin/bash
 # cron_enum.sh — Linux cron enumeration for PrivEsc routing
 #
-# Outputs explicit markers consumed by Linux Privilege Escalation Checksheet Step 3:
+# Outputs explicit markers consumed by Linux Privilege Escalation Checksheet Step 4:
 #   WRITABLE_SCRIPT[root]: <path>     → route: Cron File Permissions
 #   RELATIVE_CMD[root]: <cmd>         → (combined with WRITABLE_PATH_DIR → Cron PATH)
 #   WRITABLE_PATH_DIR: <dir>          → (combined with RELATIVE_CMD → Cron PATH)
