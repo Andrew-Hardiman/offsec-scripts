@@ -368,6 +368,48 @@ assert_contains "$OUT" "HISTORY_CRED[$TESTDIR/home/u/.psql_history]:" "T25: .psq
 teardown_fixture
 
 # ============================================================================
+# FP control v2 — binary allow-list (eliminates flag-cluster collisions)
+# ============================================================================
+# These tests assert that common -p<x> flag clusters in non-credential-bearing
+# binaries are NOT flagged as HISTORY_CRED. They guard the regex tightening
+# that restricts -p[^- ] to known DB-client binary contexts (mysql, psql,
+# mongo, etc.) instead of firing on any -p<x> anywhere.
+
+# T26: gcc -pthread NOT flagged (compiler flag cluster, common in exploit dev /
+# kernel module builds — surfaced as the dominant FP from THM PrivEsc Task 16)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "gcc -pthread c0w.c -o c0w" > "$TESTDIR/home/u/.viminfo"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_not_contains "$OUT" "HISTORY_CRED" "T26: gcc -pthread NOT flagged"
+teardown_fixture
+
+# T27: ls -plh NOT flagged (long-listing flag cluster, common dir browse)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "ls -plh /var/log" > "$TESTDIR/home/u/.bash_history"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_not_contains "$OUT" "HISTORY_CRED" "T27: ls -plh NOT flagged"
+teardown_fixture
+
+# T28: tar -pcvf NOT flagged (preserve-permissions create-verbose-file flag cluster)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "tar -pcvf backup.tar /home/user" > "$TESTDIR/home/u/.bash_history"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_not_contains "$OUT" "HISTORY_CRED" "T28: tar -pcvf NOT flagged"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 

@@ -11,10 +11,22 @@
 # Output markers:
 #   HISTORY_CRED[<file>]: <line>   - credential pattern hit (one per matched line)
 #   HISTORY_FOUND: <file>          - readable file with no regex match
-#                                    (operator: cat manually for non-standard patterns)
+#                                    (informational only; not an action trigger.
+#                                    If a real engagement surfaces a missed pattern,
+#                                    update PATTERN below + add regression test in
+#                                    history_enum.tests.sh, then commit.)
 #   HISTORY_EMPTY                  - no readable history files found
 
-PATTERN='(-p[^- ]|--password|--pwd|--pass=|--secret=|--api[-_]?key|--token=|password=|pwd=|MYSQL_PWD=|PGPASSWORD=|sshpass|Bearer |gh[psuor]_|://[^/]*:[^@]*@)'
+# CREDENTIAL PATTERN regex (grep -aniE; case-insensitive, extended POSIX).
+# -p<value> matching is bounded to known DB-client binaries via the leading
+# alternation. Bare -p[^- ] would false-positive on every -p<flag> cluster
+# in the wider shell ecosystem (gcc -pthread, tar -pcvf, nc -p<port>, etc.).
+# [^|;]* allows args between binary and -p but stops at pipe/semicolon
+# boundaries so chained commands don't cross-contaminate.
+# Allow-list vs deny-list design rationale: see Vault_Strategy.
+# Maintenance: if engagement surfaces a missed DB client (cqlsh, influx,
+# clickhouse-client, etc.), append to the alternation + add regression test.
+PATTERN='((mysql|mysqldump|mariadb|psql|pg_dump|mongo|mongosh|redis-cli)[^|;]*-p[^- ]|--password|--pwd|--pass=|--secret=|--api[-_]?key|--token=|password=|pwd=|MYSQL_PWD=|PGPASSWORD=|sshpass|Bearer |gh[psuor]_|://[^/]*:[^@]*@)'
 
 # Collect interactive user homes from /etc/passwd:
 #   $3 == 0          -> root
