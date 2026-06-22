@@ -2,7 +2,7 @@
 # config_enum.sh
 # Enumerate readable config files across system trees and scan for credential patterns.
 # Outputs explicit markers consumed by:
-#   Linux Privilege Escalation Checksheet Step 3 -> Config Files (pre-root)
+#   Linux Privilege Escalation Checksheet 'Credential Harvesting' -> Config Files (pre-root)
 #   Linux Credential Extraction Checksheet -> Config Files (post-root, future)
 #
 # Privilege-agnostic via conditional -readable filter. find -readable calls access(2)

@@ -2,7 +2,7 @@
 # ssh_enum.sh
 # Enumerate SSH key material across system trees.
 # Outputs explicit markers consumed by:
-#   Linux Privilege Escalation Checksheet Step 3 -> SSH Keys (pre-root)
+#   Linux Privilege Escalation Checksheet 'Credential Harvesting' -> SSH Keys (pre-root)
 #   Linux Credential Extraction Checksheet -> SSH Keys (post-root, future)
 #
 # Privilege-agnostic via conditional -readable filter (mirrors config_enum.sh).

@@ -2,7 +2,7 @@
 # history_enum.sh
 # Enumerate interactive-user history files and scan for credential patterns.
 # Outputs explicit markers consumed by:
-#   Linux Privilege Escalation Checksheet Step 3 -> History Files (pre-root)
+#   Linux Privilege Escalation Checksheet 'Credential Harvesting' -> History Files (pre-root)
 #   Linux Credential Extraction Checksheet -> History Files (post-root, future)
 #
 # Privilege-agnostic: -readable filter naturally yields different files depending
