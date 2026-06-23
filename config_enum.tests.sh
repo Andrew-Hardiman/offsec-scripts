@@ -19,6 +19,7 @@ fi
 
 PASS=0
 FAIL=0
+SKIP=0
 
 setup_fixture() {
   TESTDIR=$(mktemp -d)
@@ -649,7 +650,9 @@ if [ "$(id -u)" = "0" ] && command -v setpriv >/dev/null; then
   assert_not_contains "$UID1000_OUT" "rootOnlyDualCtx" "T57b: UID 1000 does NOT see root-only file"
   teardown_fixture
 else
-  echo "SKIP: T57 (requires running as root with setpriv available — try: sudo ./config_enum_tests.sh)"
+  echo "SKIP: T57a: root sees root-only file (requires running as root with setpriv available — try: sudo ./config_enum_tests.sh)"
+  echo "SKIP: T57b: UID 1000 does NOT see root-only file (requires running as root with setpriv available — try: sudo ./config_enum_tests.sh)"
+  SKIP=$((SKIP+2))
 fi
 
 # T58: SUID drop-and-launch post-root context (RUID=1000, EUID=0)
@@ -699,11 +702,15 @@ WRAPPER_EOF
     assert_not_contains "$UID1000_OUT" "suidPostRootSecret" \
       "T58b: same fixture, straight UID 1000 (no SUID wrapper) does NOT find root-only file"
   else
-    echo "SKIP: T58 (gcc compilation failed)"
+    echo "SKIP: T58a: SUID context finds root-only file via skipped -readable (gcc compilation failed)"
+    echo "SKIP: T58b: straight UID 1000 does NOT find root-only file (gcc compilation failed)"
+    SKIP=$((SKIP+2))
   fi
   teardown_fixture
 else
-  echo "SKIP: T58 (requires running as root with gcc and setpriv — try: sudo ./config_enum_tests.sh)"
+  echo "SKIP: T58a: SUID context finds root-only file via skipped -readable (requires running as root with gcc and setpriv — try: sudo ./config_enum_tests.sh)"
+  echo "SKIP: T58b: straight UID 1000 does NOT find root-only file (requires running as root with gcc and setpriv — try: sudo ./config_enum_tests.sh)"
+  SKIP=$((SKIP+2))
 fi
 
 # T59: Sudo-style post-root (RUID=EUID=0) keeps -readable filter and still finds
@@ -722,6 +729,7 @@ if [ "$(id -u)" = "0" ]; then
   teardown_fixture
 else
   echo "SKIP: T59 (requires running as root — try: sudo ./config_enum_tests.sh)"
+  SKIP=$((SKIP+1))
 fi
 
 # ============================================================================
@@ -1124,7 +1132,8 @@ teardown_fixture
 # ============================================================================
 echo ""
 echo "============================="
-echo "PASSED: $PASS"
-echo "FAILED: $FAIL"
+echo "PASSED:  $PASS"
+echo "FAILED:  $FAIL"
+echo "SKIPPED: $SKIP"
 echo "============================="
 exit "$FAIL"

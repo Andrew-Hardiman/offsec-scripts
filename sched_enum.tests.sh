@@ -22,6 +22,7 @@ fi
 
 PASS=0
 FAIL=0
+SKIP=0
 
 setup_fixture() {
   TESTDIR=$(mktemp -d)
@@ -706,6 +707,7 @@ EOF
   teardown_fixture
 else
   echo "SKIP: T27g (requires non-root execution; root bypasses chmod via DAC_OVERRIDE)"
+  SKIP=$((SKIP+1))
 fi
 
 # ============================================================================
@@ -714,7 +716,8 @@ fi
 
 echo ""
 echo "============================="
-echo "PASSED: $PASS"
-echo "FAILED: $FAIL"
+echo "PASSED:  $PASS"
+echo "FAILED:  $FAIL"
+echo "SKIPPED: $SKIP"
 echo "============================="
 exit "$FAIL"
