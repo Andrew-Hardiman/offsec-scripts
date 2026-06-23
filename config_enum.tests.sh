@@ -1024,6 +1024,102 @@ assert_contains "$OUT" "shellDeclareSecret" "T88: shell declare -x SECRET= match
 teardown_fixture
 
 # ============================================================================
+# fstab CIFS/SMB mount creds
+# ============================================================================
+
+# T89: fstab enumerated at /etc (Tree-class 1 discovery)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+UUID=abc / ext4 defaults 0 1
+UUID=def none swap sw 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "$TESTDIR/etc/fstab" "T89: /etc/fstab enumerated"
+teardown_fixture
+
+# T90: username= matches (positive — CIFS auth user)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+//srv/share /mnt/share cifs username=svcUserT90,password=pw 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "svcUserT90" "T90: username= matched"
+teardown_fixture
+
+# T91: password= matches (positive — CIFS inline password)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+//srv/share /mnt/share cifs username=u,password=cifsPwT91 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "cifsPwT91" "T91: password= matched"
+teardown_fixture
+
+# T92: credentials= matches (positive — pointer to separate cred file)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+//srv/share /mnt/share cifs credentials=/root/.smbcredsT92 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "/root/.smbcredsT92" "T92: credentials= pointer matched"
+teardown_fixture
+
+# T93: user= matches (positive — CIFS username alias per mount.cifs(8))
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+//srv/share /mnt/share cifs user=aliasUserT93,password=pw 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "aliasUserT93" "T93: user= alias matched"
+teardown_fixture
+
+# T94: empty password value matches (empty cred is itself a finding, consistent with rest of script)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+//srv/share /mnt/share cifs username=u,password=,sec=ntlmssp 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "CONFIG_CRED[$TESTDIR/etc/fstab]:" "T94: empty password value matched"
+teardown_fixture
+
+# T95: commented fstab line matches (consistent with T31 / T72 — commented creds still flagged)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+# //srv/share /mnt/share cifs username=u,password=oldPwT95 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "oldPwT95" "T95: commented fstab line matched"
+teardown_fixture
+
+# T96: plain ext4 fstab lines do NOT emit CONFIG_CRED (negative)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+/dev/sda1 / ext4 defaults 0 1
+/dev/sda2 /home ext4 defaults 0 2
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T96: plain ext4 lines NOT matched"
+teardown_fixture
+
+# T97: substring trap — `mypassword=` does NOT match (boundary anchor)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/etc/fstab" <<EOF
+/dev/sda1 /mnt ext4 mypassword=substringT97 0 0
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "substringT97" "T97: substring trap NOT matched"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

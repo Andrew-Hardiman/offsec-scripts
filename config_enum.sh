@@ -122,6 +122,16 @@ SH_VAR_PATTERN="\\b${K}\\b[[:space:]]*="
 # bare directives that would prompt interactively, but those have no file to read anyway).
 OVPN_PATTERN='^[[:space:]]*[#;]?[[:space:]]*(auth-user-pass|key|secret|tls-auth|tls-crypt|tls-crypt-v2|pkcs12)[[:space:]]+[^[:space:]]'
 
+# /etc/fstab: CIFS/SMB mount lines carrying creds inline in the comma-separated
+# options column (column 4) or pointing to a cred file via credentials=. Master
+# PATTERN doesn't apply — fstab is whitespace-column + comma-option syntax,
+# neither = nor : separated at line-start. Cred-bearing CIFS option keys per
+# mount.cifs(8): username, user, password, credentials. Anchor: start-of-line OR
+# comma/whitespace boundary, so embedded substrings (e.g. `mypassword` inside a
+# longer token) don't match. Empty values are matched (consistent with rest of
+# script — key with empty value is itself a finding).
+FSTAB_PATTERN='(^|[,[:space:]])(username|user|password|credentials)='
+
 # ============================================================
 # PRIVILEGE-CONTEXT DETECTION (sets $READABLE array used in each find call below)
 # ============================================================
@@ -170,6 +180,7 @@ done < <(find /etc /usr/local/etc -maxdepth 4 "${READABLE[@]}" -type f -size -10
        -o -name '*.yml' -o -name '*.yaml' -o -name '*.json' -o -name '*.env' \
        -o -name '*.toml' -o -name '*.properties' -o -name '*.xml' \
        -o -name '*.ovpn' \
+       -o -name 'fstab' \
        -o -name '.htpasswd' -o -name '.pgpass' \
        -o -name '.netrc' -o -name '.ldaprc' \) 2>/dev/null)
 
@@ -258,6 +269,10 @@ for f in "${FILES[@]}"; do
         *.ovpn)
             # OpenVPN configs: directive-specific pattern (space-delim, not = or :)
             matches=$(grep -aniE "$OVPN_PATTERN" "$f" 2>/dev/null)
+            ;;
+        'fstab')
+            # /etc/fstab CIFS/SMB mount creds in column 4 (comma-separated options)
+            matches=$(grep -aniE "$FSTAB_PATTERN" "$f" 2>/dev/null)
             ;;
         *)
             matches=$(grep -aniE "$PATTERN" "$f" 2>/dev/null)
