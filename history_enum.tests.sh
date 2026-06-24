@@ -411,6 +411,87 @@ assert_not_contains "$OUT" "HISTORY_CRED" "T28: tar -pcvf NOT flagged"
 teardown_fixture
 
 # ============================================================================
+# Backup-variant discovery (D2)
+# ============================================================================
+
+# T29: .bash_history.bak enumerated (standard .bak suffix)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "innocuous line" > "$TESTDIR/home/u/.bash_history.bak"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_contains "$OUT" ".bash_history.bak" "T29: .bash_history.bak enumerated"
+teardown_fixture
+
+# T30: .bash_history~ enumerated (vim tilde suffix)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "innocuous line" > "$TESTDIR/home/u/.bash_history~"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_contains "$OUT" ".bash_history~" "T30: .bash_history~ enumerated"
+teardown_fixture
+
+# T31: .zsh_history.old enumerated (alternate base + alternate suffix)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "innocuous line" > "$TESTDIR/home/u/.zsh_history.old"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_contains "$OUT" ".zsh_history.old" "T31: .zsh_history.old enumerated"
+teardown_fixture
+
+# T32: .viminfo.bak enumerated
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "innocuous line" > "$TESTDIR/home/u/.viminfo.bak"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_contains "$OUT" ".viminfo.bak" "T32: .viminfo.bak enumerated"
+teardown_fixture
+
+# T33: .lesshst.backup enumerated (full-form .backup suffix)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "innocuous line" > "$TESTDIR/home/u/.lesshst.backup"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_contains "$OUT" ".lesshst.backup" "T33: .lesshst.backup enumerated"
+teardown_fixture
+
+# T34: backup variant with cred content flows through to scan (HISTORY_CRED emitted)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "mysql -uadmin -pT34BackupCred dbname" > "$TESTDIR/home/u/.bash_history.bak"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_contains "$OUT" "T34BackupCred" "T34: backup-variant cred content emits HISTORY_CRED"
+teardown_fixture
+
+# T35: non-dot backup NOT enumerated (dot-scoping holds; notes.txt.bak ignored)
+setup_fixture
+mkdir -p "$TESTDIR/home/u"
+echo "mysql -uadmin -pT35NonDotCred dbname" > "$TESTDIR/home/u/notes.txt.bak"
+cat > "$TESTDIR/etc/passwd" <<EOF
+u:x:1000:1000::$TESTDIR/home/u:/bin/bash
+EOF
+OUT=$("$TESTDIR/history_enum.sh")
+assert_not_contains "$OUT" "T35NonDotCred" "T35: non-dot backup NOT enumerated (scope holds)"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 

@@ -40,7 +40,20 @@ while IFS= read -r h; do
     [ -d "$h" ] || continue
     while IFS= read -r f; do
         FILES+=("$f")
-    done < <(find "$h" -maxdepth 2 \( -name ".*history" -o -name ".viminfo" -o -name ".lesshst" \) -readable -type f 2>/dev/null)
+    done < <(find "$h" -maxdepth 2 \( \
+        -name ".*history" \
+        -o -name ".*history.bak" -o -name ".*history.old" -o -name ".*history.orig" \
+        -o -name ".*history.backup" -o -name ".*history.sav" -o -name ".*history.save" \
+        -o -name ".*history~" \
+        -o -name ".viminfo" \
+        -o -name ".viminfo.bak" -o -name ".viminfo.old" -o -name ".viminfo.orig" \
+        -o -name ".viminfo.backup" -o -name ".viminfo.sav" -o -name ".viminfo.save" \
+        -o -name ".viminfo~" \
+        -o -name ".lesshst" \
+        -o -name ".lesshst.bak" -o -name ".lesshst.old" -o -name ".lesshst.orig" \
+        -o -name ".lesshst.backup" -o -name ".lesshst.sav" -o -name ".lesshst.save" \
+        -o -name ".lesshst~" \
+    \) -readable -type f 2>/dev/null)
 done <<< "$HOMES"
 
 if [ ${#FILES[@]} -eq 0 ]; then
