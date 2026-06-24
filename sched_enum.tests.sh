@@ -10,7 +10,10 @@
 #
 # Run: ./sched_enum.tests.sh
 # Exit code: 0 if all pass, non-zero count = failures.
-# T27g (AT_SPOOL_DENIED) requires non-root execution; auto-skipped under uid=0.
+# T4, T12, T20, T27g all require non-root execution (auto-SKIP under uid=0) —
+# they verify behaviour that root's CAP_DAC_OVERRIDE inverts (either [ -w ]
+# always-true or chmod-deny bypassed). See sched_enum.sh header for the full
+# pre-root design intent.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_SCRIPT="$SCRIPT_DIR/sched_enum.sh"
@@ -130,13 +133,18 @@ assert_contains "$OUT" "WRITABLE_SCRIPT[root,cron]: $TESTDIR/etc/cron.daily/writ
 teardown_fixture
 
 # T4: Non-writable cron script → NO WRITABLE_SCRIPT[root,cron]
-setup_fixture
-touch "$TESTDIR/scripts/readonly.sh"
-chmod 0444 "$TESTDIR/scripts/readonly.sh"
-echo "* * * * * root $TESTDIR/scripts/readonly.sh" > "$TESTDIR/etc/crontab"
-OUT=$("$TESTDIR/sched_enum.sh")
-assert_not_contains "$OUT" "WRITABLE_SCRIPT[root,cron]:" "T4: non-writable script not flagged"
-teardown_fixture
+if [ "$(id -u)" != "0" ]; then
+  setup_fixture
+  touch "$TESTDIR/scripts/readonly.sh"
+  chmod 0444 "$TESTDIR/scripts/readonly.sh"
+  echo "* * * * * root $TESTDIR/scripts/readonly.sh" > "$TESTDIR/etc/crontab"
+  OUT=$("$TESTDIR/sched_enum.sh")
+  assert_not_contains "$OUT" "WRITABLE_SCRIPT[root,cron]:" "T4: non-writable script not flagged"
+  teardown_fixture
+else
+  echo "SKIP: T4 (requires non-root execution; root's DAC_OVERRIDE makes [ -w ] always true)"
+  SKIP=$((SKIP+1))
+fi
 
 # T5: /dev/null in cron entry → NO WRITABLE_SCRIPT[root,cron] (test -f filter)
 setup_fixture
@@ -205,13 +213,18 @@ assert_contains "$OUT" "WRITABLE_PATH_DIR[cron]: $TESTDIR/writable_path" "T11: w
 teardown_fixture
 
 # T12: Read-only PATH dir → NO WRITABLE_PATH_DIR[cron] for that dir
-setup_fixture
-mkdir -p "$TESTDIR/readonly_path"
-chmod 0555 "$TESTDIR/readonly_path"
-echo "PATH=$TESTDIR/readonly_path:/usr/bin" > "$TESTDIR/etc/crontab"
-OUT=$("$TESTDIR/sched_enum.sh")
-assert_not_contains "$OUT" "WRITABLE_PATH_DIR[cron]: $TESTDIR/readonly_path" "T12: read-only PATH dir not flagged"
-teardown_fixture
+if [ "$(id -u)" != "0" ]; then
+  setup_fixture
+  mkdir -p "$TESTDIR/readonly_path"
+  chmod 0555 "$TESTDIR/readonly_path"
+  echo "PATH=$TESTDIR/readonly_path:/usr/bin" > "$TESTDIR/etc/crontab"
+  OUT=$("$TESTDIR/sched_enum.sh")
+  assert_not_contains "$OUT" "WRITABLE_PATH_DIR[cron]: $TESTDIR/readonly_path" "T12: read-only PATH dir not flagged"
+  teardown_fixture
+else
+  echo "SKIP: T12 (requires non-root execution; root's DAC_OVERRIDE makes [ -w ] always true)"
+  SKIP=$((SKIP+1))
+fi
 
 # ============================================================================
 # WILDCARD[root,cron] tests
@@ -303,11 +316,16 @@ teardown_fixture
 # ============================================================================
 
 # T20: Empty cron config → empty output
-setup_fixture
-echo "# Empty crontab, no entries" > "$TESTDIR/etc/crontab"
-OUT=$("$TESTDIR/sched_enum.sh")
-assert_empty "$OUT" "T20: clean system produces empty output"
-teardown_fixture
+if [ "$(id -u)" != "0" ]; then
+  setup_fixture
+  echo "# Empty crontab, no entries" > "$TESTDIR/etc/crontab"
+  OUT=$("$TESTDIR/sched_enum.sh")
+  assert_empty "$OUT" "T20: clean system produces empty output"
+  teardown_fixture
+else
+  echo "SKIP: T20 (requires non-root execution; root's DAC_OVERRIDE makes [ -w ] always true)"
+  SKIP=$((SKIP+1))
+fi
 
 # ============================================================================
 # Slash-containing relative path tests (PATH search applies only to no-slash names)

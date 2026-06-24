@@ -34,6 +34,13 @@
 #   /var/spool/cron/atjobs/, /var/spool/at/                      (at-job queue, root-owned files only)
 #   Bodies of all scripts cron + anacron + at invoke as root
 #
+# Pre-root by design — operationally never run as root. Unlike history_enum /
+# config_enum / ssh_enum, sched_enum has no post-root analog: scheduled-job
+# writability has no Credential Extraction Checksheet hook (scheduled jobs are
+# a PrivEsc vector, not a credential source). Under root, [ -w ] checks become
+# meaningless via CAP_DAC_OVERRIDE — the script will run but emit operationally
+# useless markers. Tests T4/T12/T20 SKIP under root for this reason.
+#
 # PrivEsc-only filter: only root-run entries surface markers.
 # Non-root user crontabs not scanned (lateral, not PrivEsc).
 # Non-root at-jobs not scanned (lateral).
