@@ -1128,6 +1128,273 @@ assert_not_contains "$OUT" "substringT97" "T97: substring trap NOT matched"
 teardown_fixture
 
 # ============================================================================
+# D2: Backup-variant discovery
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Strip-dispatch routing — each test uses content that ONLY matches via the
+# format-specific dispatch (not via master PATTERN), so a passing assertion
+# proves the strip routed to the correct dispatch.
+# ----------------------------------------------------------------------------
+
+# T98: .netrc.bak strips to .netrc → NETRC_PATTERN dispatch (space-delim caught)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/home/u/.netrc.bak" <<EOF
+machine github.com
+login user
+password t98NetrcBakSpaceDelim
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "password t98NetrcBakSpaceDelim" "T98: .netrc.bak space-delim password caught via NETRC dispatch"
+teardown_fixture
+
+# T99: .htpasswd~ strips to .htpasswd → whole-file emission (hash line caught)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+printf 'admin:$apr1$t99TildeHash\n' > "$TESTDIR/etc/.htpasswd~"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t99TildeHash" "T99: .htpasswd~ hash line emitted via whole-file dispatch"
+teardown_fixture
+
+# T100: *.sh.bak strips to *.sh → SH_CLI_PATTERN dispatch (mysql -p<val>)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/var/www/html"
+echo "mysql -uadmin -pt100ShBakCliFlag dbname" > "$TESTDIR/var/www/html/deploy.sh.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t100ShBakCliFlag" "T100: *.sh.bak CLI -p<val> caught via SH_CLI dispatch"
+teardown_fixture
+
+# T101: *.ovpn.bak strips to *.ovpn → OVPN_PATTERN dispatch (space-delim directive)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "auth-user-pass /etc/openvpn/t101Auth.txt" > "$TESTDIR/home/u/myvpn.ovpn.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t101Auth.txt" "T101: *.ovpn.bak directive caught via OVPN dispatch"
+teardown_fixture
+
+# T102: fstab.dpkg-old strips to fstab → FSTAB_PATTERN dispatch (CIFS option-string)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "//srv/x /mnt/x cifs username=t102DpkgOldUser,password=pw 0 0" > "$TESTDIR/etc/fstab.dpkg-old"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t102DpkgOldUser" "T102: fstab.dpkg-old CIFS option caught via FSTAB dispatch"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Tree-class 1 backup-variant coverage (/etc, /usr/local/etc)
+# ----------------------------------------------------------------------------
+
+# T103: *.conf.bak in /etc with cred → CONFIG_CRED
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t103ConfBakCred" > "$TESTDIR/etc/apache.conf.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t103ConfBakCred" "T103: *.conf.bak in /etc enumerated and cred caught"
+teardown_fixture
+
+# T104: pkg-mgr suffix (.rpmnew) in /etc with cred → CONFIG_CRED
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "api_key=t104RpmNewCred" > "$TESTDIR/etc/mysvc.conf.rpmnew"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t104RpmNewCred" "T104: *.conf.rpmnew pkg-mgr suffix enumerated"
+teardown_fixture
+
+# T105: marker output preserves backup-suffix filename (strip is dispatch-only)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t105MarkerPreservation" > "$TESTDIR/etc/myapp.conf.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "CONFIG_CRED[$TESTDIR/etc/myapp.conf.bak]:" "T105a: marker shows backup-suffix path"
+assert_not_contains "$OUT" "CONFIG_CRED[$TESTDIR/etc/myapp.conf]:" "T105b: marker does NOT show stripped path"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Tree-class 2 backup-variant coverage (user homes)
+# ----------------------------------------------------------------------------
+
+# T106: .my.cnf.bak in user home with cred → CONFIG_CRED
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+cat > "$TESTDIR/home/u/.my.cnf.bak" <<EOF
+[client]
+password=t106MyCnfBakCred
+EOF
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t106MyCnfBakCred" "T106: .my.cnf.bak in home enumerated"
+teardown_fixture
+
+# T107: path-scoped .aws/credentials.bak in user home (Decision 2a)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/home/u/.aws"
+echo "aws_secret_access_key = t107AwsCredBak" > "$TESTDIR/home/u/.aws/credentials.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t107AwsCredBak" "T107: .aws/credentials.bak path-scoped enumerated"
+teardown_fixture
+
+# T108: non-dot backup in user home NOT enumerated (dot-scope holds)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t108NonDotNoMatch" > "$TESTDIR/home/u/notes.txt.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t108NonDotNoMatch" "T108: non-dot backup notes.txt.bak NOT enumerated"
+teardown_fixture
+
+# T109: T-2 has no pkg-mgr suffix coverage (.my.cnf.dpkg-old NOT enumerated)
+# Deliberate design intent — pkg managers don't write to user homes.
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t109NoTreeTwoPkgMgr" > "$TESTDIR/home/u/.my.cnf.dpkg-old"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t109NoTreeTwoPkgMgr" "T109: .my.cnf.dpkg-old in home NOT enumerated (no pkg-mgr in T-2)"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Tree-class 3a backup-variant coverage (/var/www, /srv)
+# ----------------------------------------------------------------------------
+
+# T110: wp-config.php.bak in /var/www with cred → CONFIG_CRED
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/var/www/html"
+echo "<?php define('DB_PASSWORD', 't110WpConfigBak'); ?>" > "$TESTDIR/var/www/html/wp-config.php.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t110WpConfigBak" "T110: wp-config.php.bak in /var/www enumerated"
+teardown_fixture
+
+# T111: T-3a has no pkg-mgr (wp-config.php.dpkg-old NOT enumerated under web roots)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/var/www/html"
+echo "<?php define('DB_PASSWORD', 't111NoWebPkgMgr'); ?>" > "$TESTDIR/var/www/html/wp-config.php.dpkg-old"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t111NoWebPkgMgr" "T111: pkg-mgr suffix under /var/www NOT enumerated"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Tree-class 3b backup-variant coverage (/opt)
+# ----------------------------------------------------------------------------
+
+# T112: wp-config.php.bak under /opt with cred → CONFIG_CRED
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/opt/myapp"
+echo "<?php define('DB_PASSWORD', 't112OptWpConfigBak'); ?>" > "$TESTDIR/opt/myapp/wp-config.php.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "t112OptWpConfigBak" "T112: wp-config.php.bak under /opt enumerated"
+teardown_fixture
+
+# T113: *.sh.bak under /opt NOT enumerated (T-3b .sh exclusion policy preserved)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/opt/myapp"
+echo 'mysql -uadmin -pt113OptShBak < dump.sql' > "$TESTDIR/opt/myapp/launch.sh.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t113OptShBak" "T113: *.sh.bak under /opt NOT enumerated (T-3b excludes .sh)"
+teardown_fixture
+
+# T114: T-3b has no pkg-mgr (wp-config.php.dpkg-old NOT enumerated under /opt)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/opt/myapp"
+echo "<?php define('DB_PASSWORD', 't114NoOptPkgMgr'); ?>" > "$TESTDIR/opt/myapp/wp-config.php.dpkg-old"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t114NoOptPkgMgr" "T114: pkg-mgr suffix under /opt NOT enumerated"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Infrastructure-config backup-variant exclusion (FP fix)
+# ----------------------------------------------------------------------------
+
+# T115: nsswitch.conf backup variants NOT enumerated
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "passwd: compat" > "$TESTDIR/etc/nsswitch.conf.bak"
+echo "passwd: compat" > "$TESTDIR/etc/nsswitch.conf.dpkg-old"
+echo "passwd: compat" > "$TESTDIR/etc/nsswitch.conf~"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "nsswitch.conf.bak" "T115a: nsswitch.conf.bak excluded"
+assert_not_contains "$OUT" "nsswitch.conf.dpkg-old" "T115b: nsswitch.conf.dpkg-old excluded"
+assert_not_contains "$OUT" "nsswitch.conf~" "T115c: nsswitch.conf~ excluded"
+teardown_fixture
+
+# T116: pam.conf + pam.d/* backup variants NOT enumerated
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/etc/pam.d"
+echo "auth required pam_unix.so" > "$TESTDIR/etc/pam.conf.bak"
+echo "auth required pam_unix.so" > "$TESTDIR/etc/pam.d/common-auth.dpkg-new"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "pam.conf.bak" "T116a: pam.conf.bak excluded"
+assert_not_contains "$OUT" "common-auth.dpkg-new" "T116b: pam.d/common-auth.dpkg-new excluded"
+teardown_fixture
+
+# T117: services + protocols backup variants NOT enumerated
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "ssh 22/tcp" > "$TESTDIR/etc/services.dpkg-old"
+echo "tcp 6 TCP" > "$TESTDIR/etc/protocols~"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "services.dpkg-old" "T117a: services.dpkg-old excluded"
+assert_not_contains "$OUT" "protocols~" "T117b: protocols~ excluded"
+teardown_fixture
+
+# T118: hosts.allow + hosts.deny backup variants NOT enumerated
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "sshd: 10.0.0.0/8" > "$TESTDIR/etc/hosts.allow.backup"
+echo "ALL: ALL" > "$TESTDIR/etc/hosts.deny.rpmsave"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "hosts.allow.backup" "T118a: hosts.allow.backup excluded"
+assert_not_contains "$OUT" "hosts.deny.rpmsave" "T118b: hosts.deny.rpmsave excluded"
+teardown_fixture
+
+# T119: ld.so.conf + ld.so.conf.d/* backup variants NOT enumerated
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+mkdir -p "$TESTDIR/etc/ld.so.conf.d"
+echo "include /etc/ld.so.conf.d/*.conf" > "$TESTDIR/etc/ld.so.conf.bak"
+echo "/usr/local/lib" > "$TESTDIR/etc/ld.so.conf.d/x86_64.conf.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "ld.so.conf.bak" "T119a: ld.so.conf.bak excluded"
+assert_not_contains "$OUT" "ld.so.conf.d/x86_64.conf.bak" "T119b: ld.so.conf.d/x86_64.conf.bak excluded"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Edge cases
+# ----------------------------------------------------------------------------
+
+# T120: double-suffix (apache.conf.bak.old) NOT enumerated — find-name patterns
+# stop at single-suffix variants. Pins the documented one-strip limitation.
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t120DoubleSuffix" > "$TESTDIR/etc/apache.conf.bak.old"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t120DoubleSuffix" "T120: double-suffix .conf.bak.old NOT enumerated (one-strip limit)"
+teardown_fixture
+
+# T121: no broad-catch in /etc — random.bak (non-allowlist stem) NOT enumerated.
+# Pins Decision 1A — per-existing-pattern variants, no bare *.bak catch-all.
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t121NoBroadCatch" > "$TESTDIR/etc/random.bak"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t121NoBroadCatch" "T121: random.bak (no allowlist stem) NOT enumerated"
+teardown_fixture
+
+# T122: substring trap — apache.conf.baksomething NOT enumerated. The .bak
+# pattern requires exact-suffix match, not substring.
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password=t122SubstringTrap" > "$TESTDIR/etc/apache.conf.baksomething"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "t122SubstringTrap" "T122: substring trap .baksomething NOT matched"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""
