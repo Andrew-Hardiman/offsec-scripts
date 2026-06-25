@@ -1343,6 +1343,170 @@ assert_not_contains "$OUT" "$TESTDIR/usr/share/doc" "T85: /usr/share/doc pruned 
 teardown_fixture
 
 # ============================================================================
+# Backup-suffix discovery (D2 — strip pre-dispatch routing)
+# ============================================================================
+# Suffix-strip pre-dispatch canonicalises backup-variant filenames before both
+# dispatch sites. Without strip: denial dispatch falls to generic SSH_FILE_DENIED;
+# success dispatch silently drops config.*/known_hosts.* and mis-routes
+# authorized_keys.* to SSH_PUBKEY via the first-line pubkey regex. T86-T99 cover
+# integration through the strip + dispatch chain; the strip mechanism itself was
+# sandbox-verified across the full 7-suffix matrix independently.
+
+# ----------------------------------------------------------------------------
+# Denial-dispatch routing — each affected canonical name
+# ----------------------------------------------------------------------------
+
+# T86: authorized_keys.bak (denied) -> SSH_AUTHKEYS_DENIED via strip
+setup_fixture
+mk_authkeys "$TESTDIR/root/.ssh/authorized_keys.bak" "ssh-rsa AAAA x"
+chmod 000 "$TESTDIR/root/.ssh/authorized_keys.bak"
+chmod 755 "$TESTDIR/root/.ssh"; chmod 755 "$TESTDIR/root"
+OUT=$(run_as_nobody)
+assert_nobody_contains "$OUT" "SSH_AUTHKEYS_DENIED: $TESTDIR/root/.ssh/authorized_keys.bak" \
+    "T86: authorized_keys.bak (denied) -> SSH_AUTHKEYS_DENIED via strip"
+teardown_fixture
+
+# T87: config.bak (denied) -> SSH_CONFIG_DENIED via strip
+setup_fixture
+mk_config "$TESTDIR/root/.ssh/config.bak" "Host x"
+chmod 000 "$TESTDIR/root/.ssh/config.bak"
+chmod 755 "$TESTDIR/root/.ssh"; chmod 755 "$TESTDIR/root"
+OUT=$(run_as_nobody)
+assert_nobody_contains "$OUT" "SSH_CONFIG_DENIED: $TESTDIR/root/.ssh/config.bak" \
+    "T87: config.bak (denied) -> SSH_CONFIG_DENIED via strip"
+teardown_fixture
+
+# T88: known_hosts.bak (denied) -> SSH_KNOWNHOSTS_DENIED via strip
+setup_fixture
+mk_known_hosts "$TESTDIR/root/.ssh/known_hosts.bak" "host1 ssh-rsa AAAA"
+chmod 000 "$TESTDIR/root/.ssh/known_hosts.bak"
+chmod 755 "$TESTDIR/root/.ssh"; chmod 755 "$TESTDIR/root"
+OUT=$(run_as_nobody)
+assert_nobody_contains "$OUT" "SSH_KNOWNHOSTS_DENIED: $TESTDIR/root/.ssh/known_hosts.bak" \
+    "T88: known_hosts.bak (denied) -> SSH_KNOWNHOSTS_DENIED via strip"
+teardown_fixture
+
+# T89: mykey.pem.bak (denied) -> SSH_PRIVKEY_DENIED via strip
+# Non-id_*-prefixed privkey backup; strips to mykey.pem which matches *.pem arm.
+setup_fixture
+mk_priv_key_plain "$TESTDIR/root/.ssh/mykey.pem.bak"
+chmod 000 "$TESTDIR/root/.ssh/mykey.pem.bak"
+chmod 755 "$TESTDIR/root/.ssh"; chmod 755 "$TESTDIR/root"
+OUT=$(run_as_nobody)
+assert_nobody_contains "$OUT" "SSH_PRIVKEY_DENIED: $TESTDIR/root/.ssh/mykey.pem.bak" \
+    "T89: mykey.pem.bak (denied) -> SSH_PRIVKEY_DENIED via strip (*.pem after strip)"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Success-dispatch routing — fixes mis-routes and silent drops
+# ----------------------------------------------------------------------------
+
+# T90: authorized_keys.bak (readable) -> SSH_AUTHKEYS, not SSH_PUBKEY (mis-route fix)
+setup_fixture
+mk_authkeys "$TESTDIR/root/.ssh/authorized_keys.bak" "ssh-rsa AAAA user@host"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_AUTHKEYS: $TESTDIR/root/.ssh/authorized_keys.bak" \
+    "T90a: authorized_keys.bak (readable) -> SSH_AUTHKEYS via strip"
+assert_not_contains "$OUT" "SSH_PUBKEY: $TESTDIR/root/.ssh/authorized_keys.bak" \
+    "T90b: authorized_keys.bak does NOT mis-route to SSH_PUBKEY (regression fix)"
+teardown_fixture
+
+# T91: config.bak (readable) -> SSH_CONFIG (was silently dropped pre-D2)
+setup_fixture
+mk_config "$TESTDIR/root/.ssh/config.bak" "Host pivot" "  HostName 10.0.0.5"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_CONFIG: $TESTDIR/root/.ssh/config.bak" \
+    "T91: config.bak (readable) -> SSH_CONFIG via strip (no longer silently dropped)"
+teardown_fixture
+
+# T92: known_hosts.bak (readable) -> SSH_KNOWNHOSTS (was silently dropped pre-D2)
+setup_fixture
+mk_known_hosts "$TESTDIR/root/.ssh/known_hosts.bak" "host1.example.com ssh-rsa AAAA"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_KNOWNHOSTS: $TESTDIR/root/.ssh/known_hosts.bak" \
+    "T92: known_hosts.bak (readable) -> SSH_KNOWNHOSTS via strip (no longer silently dropped)"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Suffix-variation coverage — proves strip handles non-.bak suffixes
+# ----------------------------------------------------------------------------
+
+# T93: authorized_keys~ — tilde-strip via different parameter expansion (${bn%\~})
+setup_fixture
+mk_authkeys "$TESTDIR/root/.ssh/authorized_keys~" "ssh-rsa AAAA user@host"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_AUTHKEYS: $TESTDIR/root/.ssh/authorized_keys~" \
+    "T93: authorized_keys~ -> SSH_AUTHKEYS via tilde-strip"
+teardown_fixture
+
+# T94: config.save — different generic suffix (not just .bak)
+setup_fixture
+mk_config "$TESTDIR/root/.ssh/config.save" "Host x"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_CONFIG: $TESTDIR/root/.ssh/config.save" \
+    "T94: config.save -> SSH_CONFIG via .save-strip"
+teardown_fixture
+
+# T95: known_hosts.old — formerly-dead-literal case
+# Before D2: handled by explicit known_hosts.old literal in dispatch case.
+# After D2:  strip removes .old -> dispatch matches canonical known_hosts arm;
+# literal removed as dead code. Test pins .old still routes correctly via strip.
+setup_fixture
+mk_known_hosts "$TESTDIR/root/.ssh/known_hosts.old" "host1 ssh-rsa AAAA"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_KNOWNHOSTS: $TESTDIR/root/.ssh/known_hosts.old" \
+    "T95: known_hosts.old -> SSH_KNOWNHOSTS via strip (formerly-dead-literal still routes)"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Canonical-name regression preservation
+# ----------------------------------------------------------------------------
+
+# T96: canonical known_hosts still routes after dead-literal removal
+# (regression check — known_hosts.old literal was removed; canonical 'known_hosts'
+# must still match the first disjunct of the dispatch case)
+setup_fixture
+mk_known_hosts "$TESTDIR/root/.ssh/known_hosts" "host1 ssh-rsa AAAA"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_contains "$OUT" "SSH_KNOWNHOSTS: $TESTDIR/root/.ssh/known_hosts" \
+    "T96: canonical known_hosts routes correctly (regression after dead-literal removal)"
+teardown_fixture
+
+# ----------------------------------------------------------------------------
+# Documented limitations
+# ----------------------------------------------------------------------------
+
+# T97: double-suffix (one-strip limit) — authorized_keys.bak.old does NOT canonicalize.
+# Strip removes outer .old -> bn_dispatch=authorized_keys.bak which doesn't match any
+# canonical name -> falls to first-line pubkey regex -> mis-routes to SSH_PUBKEY.
+# Pins the documented one-strip limitation.
+setup_fixture
+mk_authkeys "$TESTDIR/root/.ssh/authorized_keys.bak.old" "ssh-rsa AAAA user@host"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_not_contains "$OUT" "SSH_AUTHKEYS: $TESTDIR/root/.ssh/authorized_keys.bak.old" \
+    "T97: double-suffix NOT canonicalized (one-strip limit — file mis-routes)"
+teardown_fixture
+
+# T98: substring trap — *.bakery does NOT match *.bak (case requires exact suffix).
+# Strip leaves bn_dispatch unchanged; file routes via first-line pubkey regex.
+setup_fixture
+mk_authkeys "$TESTDIR/root/.ssh/authorized_keys.bakery" "ssh-rsa AAAA user@host"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_not_contains "$OUT" "SSH_AUTHKEYS: $TESTDIR/root/.ssh/authorized_keys.bakery" \
+    "T98: .bakery substring NOT matched (exact-suffix-only)"
+teardown_fixture
+
+# T99: case-sensitivity gap — *.BAK does NOT match *.bak (bash case is case-sensitive).
+# Pins the documented limitation; cross-script retrofit deferred (see V_S Open items).
+# config.BAK is silently ignored (unrecognized name, no PEM content, no pubkey line).
+setup_fixture
+mk_config "$TESTDIR/root/.ssh/config.BAK" "Host x"
+OUT=$("$TESTDIR/ssh_enum.sh")
+assert_not_contains "$OUT" "SSH_CONFIG: $TESTDIR/root/.ssh/config.BAK" \
+    "T99: uppercase .BAK NOT stripped (case-sensitivity gap — retrofit deferred)"
+teardown_fixture
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

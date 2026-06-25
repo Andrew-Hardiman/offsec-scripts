@@ -47,6 +47,9 @@
 #     to legacy PEM only (Proc-Type: 4,ENCRYPTED still works).
 #   - awk numeric comparison ($uid >= 1000) uses bash arithmetic test; non-numeric
 #     UIDs in /etc/passwd (impossible per spec) would error and be silently skipped.
+#   - Backup-suffix matching is case-sensitive — *.BAK/.Old/.Save variants not
+#     caught. Cross-script retrofit (history_enum/config_enum/ssh_enum, shopt -s
+#     nocasematch) tracked in Vault_Strategy.md Open items.
 
 # ============================================================
 # PRIVILEGE-CONTEXT DETECTION
@@ -182,9 +185,30 @@ for dir in "${SSH_DIRS[@]}"; do
     for f in "$dir"/*; do
         [ -f "$f" ] || continue
         bn=$(basename "$f")
+        # Suffix-strip pre-dispatch (D2): backup-variant files (e.g. authorized_keys.bak,
+        # config~, known_hosts.old, mykey.pem.bak) dispatch to their canonical-name
+        # handler. Without this, denial dispatch's authorized_keys/config/known_hosts
+        # arms miss backup variants (fall to SSH_FILE_DENIED), and success dispatch
+        # silently drops config/known_hosts backups (or mis-routes authorized_keys.bak
+        # to SSH_PUBKEY via the first-line pubkey regex). 7 suffixes only — no pkg-mgr
+        # (.dpkg-old/.rpmnew) since package managers don't write SSH key material.
+        # config_enum.sh uses the same mechanism with pkg-mgr suffixes added.
+        # Documented limitations: one-strip only (authorized_keys.bak.old falls back
+        # to authorized_keys.bak); case-sensitive (see KNOWN LIMITATIONS).
+        case "$bn" in
+            *.bak|*.old|*.orig|*.backup|*.sav|*.save)
+                bn_dispatch="${bn%.*}"
+                ;;
+            *~)
+                bn_dispatch="${bn%\~}"
+                ;;
+            *)
+                bn_dispatch="$bn"
+                ;;
+        esac
 
         if ! is_readable_file "$f"; then
-            case "$bn" in
+            case "$bn_dispatch" in
                 id_*|*.pem|*.key|*_key)
                     echo "SSH_PRIVKEY_DENIED: $f"
                     ;;
@@ -194,7 +218,7 @@ for dir in "${SSH_DIRS[@]}"; do
                 config)
                     echo "SSH_CONFIG_DENIED: $f"
                     ;;
-                known_hosts|known_hosts2|known_hosts.old)
+                known_hosts|known_hosts2)
                     echo "SSH_KNOWNHOSTS_DENIED: $f"
                     ;;
                 *)
@@ -208,19 +232,19 @@ for dir in "${SSH_DIRS[@]}"; do
 
         if echo "$first" | grep -qE "^-----BEGIN [A-Z ]*PRIVATE KEY-----"; then
             emit_privkey "$f"
-        elif [ "$bn" = "authorized_keys" ] || [ "$bn" = "authorized_keys2" ]; then
+        elif [ "$bn_dispatch" = "authorized_keys" ] || [ "$bn_dispatch" = "authorized_keys2" ]; then
             echo "SSH_AUTHKEYS: $f"
             while IFS= read -r line; do
                 case "$line" in ''|\#*) continue ;; esac
                 echo "  $line"
             done < "$f"
-        elif [ "$bn" = "config" ]; then
+        elif [ "$bn_dispatch" = "config" ]; then
             echo "SSH_CONFIG: $f"
             while IFS= read -r line; do
                 case "$line" in ''|\#*) continue ;; esac
                 echo "  $line"
             done < "$f"
-        elif [ "$bn" = "known_hosts" ] || [ "$bn" = "known_hosts2" ] || [ "$bn" = "known_hosts.old" ]; then
+        elif [ "$bn_dispatch" = "known_hosts" ] || [ "$bn_dispatch" = "known_hosts2" ]; then
             echo "SSH_KNOWNHOSTS: $f"
             awk '!/^[#|]/ && NF>0 { if ($1 ~ /^@/) { split($2, a, ","); print "  " $1 " " a[1] } else { split($1, a, ","); print "  " a[1] } }' "$f" | sort -u
         elif echo "$first" | grep -qE "^(ssh-(rsa|ed25519|ecdsa|dss)|ecdsa-sha2-)"; then
