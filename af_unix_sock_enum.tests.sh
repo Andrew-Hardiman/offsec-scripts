@@ -121,7 +121,7 @@ assert_equals "$OUT" "AF_UNIX_SOCK_SCANNED" "T1: empty scope emits only terminat
 teardown_fixture
 
 # ============================================================================
-# T2: Real-target noise — Andrew's Ubuntu (17) + Kali (5) baseline paths.
+# T2: Real-target noise — Ubuntu (17) + Kali (5) + THM (1) baseline paths.
 # All must be silently dropped by the blacklist. Regression guard against
 # blacklist pattern drift on real stock installs.
 # ============================================================================
@@ -148,8 +148,9 @@ mksock "$TESTDIR/run/polkit/agent-helper.socket"
 mksock "$TESTDIR/run/pcscd/pcscd.comm"
 mksock "$TESTDIR/tmp/.iprt-localipc-DRMIpcServer"
 mksock "$TESTDIR/tmp/.X11-unix/X0"
+mksock "$TESTDIR/var/run/acpid.socket"
 OUT=$("$TESTDIR/af_unix_sock_enum.sh")
-assert_equals "$OUT" "AF_UNIX_SOCK_SCANNED" "T2: 22 real-target noise paths silently dropped"
+assert_equals "$OUT" "AF_UNIX_SOCK_SCANNED" "T2: 23 real-target noise paths silently dropped"
 teardown_fixture
 
 # ============================================================================
@@ -305,8 +306,9 @@ mksock "$TESTDIR/run/polkit/probe.sock"
 mksock "$TESTDIR/run/pcscd/probe.sock"
 mksock "$TESTDIR/run/ssh-unix-local/probe.sock"
 mksock "$TESTDIR/tmp/.iprt-localipc-probe"
+mksock "$TESTDIR/var/run/acpid.socket"
 OUT=$("$TESTDIR/af_unix_sock_enum.sh")
-assert_equals "$OUT" "AF_UNIX_SOCK_SCANNED" "T11: all 19 blacklist patterns silently drop (per-pattern regression)"
+assert_equals "$OUT" "AF_UNIX_SOCK_SCANNED" "T11: all 20 blacklist patterns silently drop (per-pattern regression)"
 teardown_fixture
 
 # ============================================================================

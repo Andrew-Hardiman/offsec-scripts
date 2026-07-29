@@ -68,7 +68,8 @@ find /var/run /run /tmp /var/lib /var/snap -type s -writable -not -user "$(id -u
     #   pcscd/*           — PC/SC smart card daemon
     #   ssh-unix-local/*  — systemd-ssh-generator local SSH endpoint (SSH auth applies)
     #   .iprt-localipc-*  — VirtualBox Guest Additions display IPC (no code exec)
-    */systemd/*|*/dbus/*|*/cups/*|*/avahi-daemon/*|*/uuidd/*|*/NetworkManager/*|*/lvm/*|*/tuned/*|*/dmeventd*|*/sepermit/*|*/rpcbind*|*/snapd*|*/.ICE-unix/*|*/.X11-unix/*|*/canonical-livepatch/*|*/polkit/*|*/pcscd/*|*/ssh-unix-local/*|*/.iprt-localipc-*)
+    #   acpid.socket      — ACPI event daemon (world-connectable by design; event-subscription only, no code exec)
+    */systemd/*|*/dbus/*|*/cups/*|*/avahi-daemon/*|*/uuidd/*|*/NetworkManager/*|*/lvm/*|*/tuned/*|*/dmeventd*|*/sepermit/*|*/rpcbind*|*/snapd*|*/.ICE-unix/*|*/.X11-unix/*|*/canonical-livepatch/*|*/polkit/*|*/pcscd/*|*/ssh-unix-local/*|*/.iprt-localipc-*|*/acpid.socket)
       ;;
 
     # --- Catch-all: novel writable socket, triage via walkthrough ---
