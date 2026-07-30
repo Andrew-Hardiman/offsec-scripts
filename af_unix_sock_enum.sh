@@ -8,8 +8,6 @@
 #   WRITABLE_AF_UNIX_SOCK[docker]:     <path>  → Docker Socket Abuse
 #   WRITABLE_AF_UNIX_SOCK[lxd]:        <path>  → LXD Socket Abuse
 #   WRITABLE_AF_UNIX_SOCK[redis]:      <path>  → Redis Socket Abuse
-#   WRITABLE_AF_UNIX_SOCK[mysql/mariadb]:      <path>  → MySQL/MariaDB Socket Abuse
-#   WRITABLE_AF_UNIX_SOCK[postgresql]: <path>  → PostgreSQL Socket Abuse
 #   WRITABLE_AF_UNIX_SOCK[memcached]:  <path>  → no canonical chain, take next
 #   WRITABLE_AF_UNIX_SOCK[unknown]:    <path>  → Unknown Daemon Socket Abuse
 #   AF_UNIX_SOCK_SCANNED                       → check-completion (always emitted)
@@ -44,8 +42,6 @@ find /var/run /run /tmp /var/lib /var/snap -type s -writable -not -user "$(id -u
     */docker.sock)                                  echo "WRITABLE_AF_UNIX_SOCK[docker]: $s" ;;
     */lxd/unix.socket|*/lxd/*/unix.socket)          echo "WRITABLE_AF_UNIX_SOCK[lxd]: $s" ;;
     */redis*.sock|*/redis-server.sock)              echo "WRITABLE_AF_UNIX_SOCK[redis]: $s" ;;
-    */mysqld.sock|*/mysql.sock|*/mariadb.sock)      echo "WRITABLE_AF_UNIX_SOCK[mysql/mariadb]: $s" ;;
-    */.s.PGSQL.*|*/postgresql/*)                    echo "WRITABLE_AF_UNIX_SOCK[postgresql]: $s" ;;
     */memcached.sock)                               echo "WRITABLE_AF_UNIX_SOCK[memcached]: $s" ;;
 
     # --- Blacklist: legit-by-design system daemons (silent drop) ---
@@ -69,7 +65,9 @@ find /var/run /run /tmp /var/lib /var/snap -type s -writable -not -user "$(id -u
     #   ssh-unix-local/*  — systemd-ssh-generator local SSH endpoint (SSH auth applies)
     #   .iprt-localipc-*  — VirtualBox Guest Additions display IPC (no code exec)
     #   acpid.socket      — ACPI event daemon (world-connectable by design; event-subscription only, no code exec)
-    */systemd/*|*/dbus/*|*/cups/*|*/avahi-daemon/*|*/uuidd/*|*/NetworkManager/*|*/lvm/*|*/tuned/*|*/dmeventd*|*/sepermit/*|*/rpcbind*|*/snapd*|*/.ICE-unix/*|*/.X11-unix/*|*/canonical-livepatch/*|*/polkit/*|*/pcscd/*|*/ssh-unix-local/*|*/.iprt-localipc-*|*/acpid.socket)
+    #   mysqld.sock, mysql.sock, mariadb.sock  — MySQL/MariaDB. NOT a writable-socket-primitive vector: default socket perms are 0777 on all distros (writability ubiquitous, not a misconfig signal); MySQL protocol requires authentication regardless of transport; UDF exploit chain is auth-gated and transport-agnostic (socket vs TCP identical). Discriminating condition = "mysqld runs as root" (detected by ps in LPEC Step 10) + "attacker can authenticate with FILE priv" (harvested creds OR auth-bypass paths handled in the MySQL UDF walkthrough Step 1). Canonical route: LPEC Step 10 → [[MySQL UDF]].
+    #   .s.PGSQL.*, postgresql/*  — PostgreSQL. Same reasoning as MySQL/MariaDB: default 0777 socket (transport availability, not exploit signal), auth required regardless of transport, COPY FROM PROGRAM exploit is auth-gated and transport-agnostic. Canonical route: LPEC Step 10 → [[Postgres UDF]].
+    */systemd/*|*/dbus/*|*/cups/*|*/avahi-daemon/*|*/uuidd/*|*/NetworkManager/*|*/lvm/*|*/tuned/*|*/dmeventd*|*/sepermit/*|*/rpcbind*|*/snapd*|*/.ICE-unix/*|*/.X11-unix/*|*/canonical-livepatch/*|*/polkit/*|*/pcscd/*|*/ssh-unix-local/*|*/.iprt-localipc-*|*/acpid.socket|*/mysqld.sock|*/mysql.sock|*/mariadb.sock|*/.s.PGSQL.*|*/postgresql/*)
       ;;
 
     # --- Catch-all: novel writable socket, triage via walkthrough ---
