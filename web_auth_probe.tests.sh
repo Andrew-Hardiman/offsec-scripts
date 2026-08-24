@@ -46,13 +46,13 @@ if command -v curl >/dev/null 2>&1; then HAVE_CURL=yes; fi
 if [ "$HAVE_PYTHON3" = "yes" ]; then
     printf "  python3: yes\n"
 else
-    printf "  python3: NO  — 25 integration tests will skip (needed for mock HTTP server)\n"
+    printf "  python3: NO  — 37 integration tests will skip (needed for mock HTTP server)\n"
 fi
 
 if [ "$HAVE_CURL" = "yes" ]; then
     printf "  curl:    yes\n"
 else
-    printf "  curl:    NO  — 25 integration tests will skip (needed by script under test)\n"
+    printf "  curl:    NO  — 37 integration tests will skip (needed by script under test)\n"
 fi
 
 echo
@@ -245,6 +245,18 @@ if [ "$HAVE_PYTHON3" = "no" ] || [ "$HAVE_CURL" = "no" ]; then
     _skip "T34" "forgot mode integration: /forgot FOUND" "$reason"
     _skip "T35" "mode isolation: register form not flagged as LOGIN_FORM_FOUND" "$reason"
     _skip "T36" "unreachable host emits UNREACHABLE marker" "$reason"
+    _skip "T37a" "default login: DEAD markers suppressed" "$reason"
+    _skip "T37b" "default register: DEAD markers suppressed" "$reason"
+    _skip "T37c" "default forgot: DEAD markers suppressed" "$reason"
+    _skip "T38a" "--verbose login: DEAD marker emitted" "$reason"
+    _skip "T38b" "--verbose register: DEAD marker emitted" "$reason"
+    _skip "T38c" "--verbose forgot: DEAD marker emitted" "$reason"
+    _skip "T39a" "default login summary: dead=3 (counter accurate despite suppression)" "$reason"
+    _skip "T39b" "--verbose login summary: dead=3" "$reason"
+    _skip "T39c" "default register summary: dead=3" "$reason"
+    _skip "T39d" "--verbose register summary: dead=3" "$reason"
+    _skip "T39e" "default forgot summary: dead=3" "$reason"
+    _skip "T39f" "--verbose forgot summary: dead=3" "$reason"
 else
     FIXTURE_DIR=$(mktemp -d)
     trap "kill \$SERVER_PID 2>/dev/null; rm -rf $FIXTURE_DIR" EXIT
@@ -388,29 +400,84 @@ WEOF
     else
         _fail "T36" "unreachable host emits UNREACHABLE marker" "no UNREACHABLE markers in output"
     fi
+
+    # --- Verbose flag tests (T37–T39): all three modes ---
+    # Wrapper injects a path list with known 404s for all modes so we can
+    # verify DEAD suppression uniformly.
+    cat > "$FIXTURE_DIR/wrapper_verbose_login.sh" << WEOF
+#!/bin/bash
+set -u
+source "$SCRIPT"
+LOGIN_PATHS=(/login.php /nonexistent1 /nonexistent2 /nonexistent3)
+main "\$@"
+WEOF
+    cat > "$FIXTURE_DIR/wrapper_verbose_register.sh" << WEOF
+#!/bin/bash
+set -u
+source "$SCRIPT"
+REGISTER_PATHS=(/register.php /nonexistent1 /nonexistent2 /nonexistent3)
+main "\$@"
+WEOF
+    cat > "$FIXTURE_DIR/wrapper_verbose_forgot.sh" << WEOF
+#!/bin/bash
+set -u
+source "$SCRIPT"
+FORGOT_PATHS=(/forgot /nonexistent1 /nonexistent2 /nonexistent3)
+main "\$@"
+WEOF
+    chmod +x "$FIXTURE_DIR/wrapper_verbose_login.sh" \
+             "$FIXTURE_DIR/wrapper_verbose_register.sh" \
+             "$FIXTURE_DIR/wrapper_verbose_forgot.sh"
+
+    # T37: default (no --verbose) suppresses DEAD markers
+    login_default_out=$(bash "$FIXTURE_DIR/wrapper_verbose_login.sh" localhost "$PORT_UT" --mode=login 2>&1)
+    register_default_out=$(bash "$FIXTURE_DIR/wrapper_verbose_register.sh" localhost "$PORT_UT" --mode=register 2>&1)
+    forgot_default_out=$(bash "$FIXTURE_DIR/wrapper_verbose_forgot.sh" localhost "$PORT_UT" --mode=forgot 2>&1)
+
+    assert_not_contains "T37a" "default login: DEAD markers suppressed" "DEAD:" "$login_default_out"
+    assert_not_contains "T37b" "default register: DEAD markers suppressed" "DEAD:" "$register_default_out"
+    assert_not_contains "T37c" "default forgot: DEAD markers suppressed" "DEAD:" "$forgot_default_out"
+
+    # T38: --verbose emits DEAD markers
+    login_verbose_out=$(bash "$FIXTURE_DIR/wrapper_verbose_login.sh" localhost "$PORT_UT" --mode=login --verbose 2>&1)
+    register_verbose_out=$(bash "$FIXTURE_DIR/wrapper_verbose_register.sh" localhost "$PORT_UT" --mode=register --verbose 2>&1)
+    forgot_verbose_out=$(bash "$FIXTURE_DIR/wrapper_verbose_forgot.sh" localhost "$PORT_UT" --mode=forgot --verbose 2>&1)
+
+    assert_contains "T38a" "--verbose login: DEAD marker for /nonexistent1 emitted" "DEAD: /nonexistent1 (code=404)" "$login_verbose_out"
+    assert_contains "T38b" "--verbose register: DEAD marker for /nonexistent2 emitted" "DEAD: /nonexistent2 (code=404)" "$register_verbose_out"
+    assert_contains "T38c" "--verbose forgot: DEAD marker for /nonexistent3 emitted" "DEAD: /nonexistent3 (code=404)" "$forgot_verbose_out"
+
+    # T39: summary count for dead=N accurate under both modes (verbose ON and OFF)
+    # Each wrapper has 3 nonexistent paths + 1 real → dead=3 expected in all cases
+    assert_contains "T39a" "default login summary: dead=3 (counter accurate despite suppression)" "dead=3" "$login_default_out"
+    assert_contains "T39b" "--verbose login summary: dead=3 (matches default)" "dead=3" "$login_verbose_out"
+    assert_contains "T39c" "default register summary: dead=3" "dead=3" "$register_default_out"
+    assert_contains "T39d" "--verbose register summary: dead=3" "dead=3" "$register_verbose_out"
+    assert_contains "T39e" "default forgot summary: dead=3" "dead=3" "$forgot_default_out"
+    assert_contains "T39f" "--verbose forgot summary: dead=3" "dead=3" "$forgot_verbose_out"
 fi
 
 # ------------------------------------------------------------------------------
-# CATEGORY 3: Argument validation (T37–T42)
+# CATEGORY 3: Argument validation (T40–T45)
 # ------------------------------------------------------------------------------
 
 out=$(bash "$SCRIPT" 2>&1 || true)
-assert_contains "T37" "no args → usage" "Usage:" "$out"
+assert_contains "T40" "no args → usage" "Usage:" "$out"
 
 out=$(bash "$SCRIPT" host 80 2>&1 || true)
-assert_contains "T38" "no --mode → error" "--mode required" "$out"
+assert_contains "T41" "no --mode → error" "--mode required" "$out"
 
 out=$(bash "$SCRIPT" host 80 --mode=bogus 2>&1 || true)
-assert_contains "T39" "invalid mode → error" "invalid mode" "$out"
+assert_contains "T42" "invalid mode → error" "invalid mode" "$out"
 
 out=$(bash "$SCRIPT" host 80 --mode=login --scheme=ftp 2>&1 || true)
-assert_contains "T40" "invalid scheme → error" "invalid scheme" "$out"
+assert_contains "T43" "invalid scheme → error" "invalid scheme" "$out"
 
 out=$(bash "$SCRIPT" host 80 --mode=login --bogus 2>&1 || true)
-assert_contains "T41" "unknown flag → error" "unknown flag" "$out"
+assert_contains "T44" "unknown flag → error" "unknown flag" "$out"
 
 out=$(bash "$SCRIPT" --help 2>&1 || true)
-assert_contains "T42" "--help → usage" "Usage:" "$out"
+assert_contains "T45" "--help → usage" "Usage:" "$out"
 
 # ------------------------------------------------------------------------------
 # Summary

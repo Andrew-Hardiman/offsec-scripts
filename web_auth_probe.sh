@@ -9,7 +9,7 @@
 #
 # Usage:
 #   web_auth_probe.sh <host> <port> --mode=<login|register|forgot> \
-#                     [--scheme=<http|https>]
+#                     [--scheme=<http|https>] [--verbose]
 #
 # Marker output contract:
 #
@@ -31,6 +31,8 @@
 #         Live path with 200 response, no <form> element found.
 #     DEAD: <orig> (code=<c>)
 #         404 or other clearly-non-existent (400, 410, unexpected codes).
+#         SUPPRESSED BY DEFAULT — use --verbose to include in output.
+#         Summary counter (dead=N) always accurate regardless of flag.
 #     UNREACHABLE: <orig> (curl_exit=<n>)
 #         curl failed (connection refused, timeout, DNS fail, etc.).
 #
@@ -132,6 +134,7 @@ HOST=""
 PORT=""
 MODE=""
 SCHEME="http"
+VERBOSE=no
 PATHS=()
 MODE_UPPER=""
 
@@ -161,7 +164,7 @@ G_CAND_DETAIL=""
 
 usage() {
     cat >&2 <<'EOF'
-Usage: web_auth_probe.sh <host> <port> --mode=<login|register|forgot> [--scheme=<http|https>]
+Usage: web_auth_probe.sh <host> <port> --mode=<login|register|forgot> [--scheme=<http|https>] [--verbose]
 
 Positional arguments:
   <host>              Target hostname or IP
@@ -172,6 +175,8 @@ Required flags:
 
 Optional flags:
   --scheme=<scheme>   URL scheme: 'http' (default) or 'https'
+  --verbose           Include DEAD markers (404s and unexpected codes) in output.
+                      Default: DEAD suppressed; summary count still accurate.
   --help, -h          Show this help
 
 See top-of-script comment for marker output contract and detection heuristics.
@@ -188,6 +193,7 @@ parse_args() {
         case "$1" in
             --mode=*)    MODE="${1#--mode=}"; shift ;;
             --scheme=*)  SCHEME="${1#--scheme=}"; shift ;;
+            --verbose)   VERBOSE=yes; shift ;;
             --help|-h)   usage ;;
             --*)         echo "ERROR: unknown flag: $1" >&2; usage ;;
             *)
@@ -478,7 +484,7 @@ probe_path() {
             N_RESTRICTED=$((N_RESTRICTED + 1))
             ;;
         404)
-            echo "DEAD: $p (code=404)"
+            [ "$VERBOSE" = "yes" ] && echo "DEAD: $p (code=404)"
             N_DEAD=$((N_DEAD + 1))
             ;;
         405)
@@ -491,7 +497,7 @@ probe_path() {
             ;;
         *)
             # Unexpected: e.g., 3xx if -L broken, other 4xx (400, 410, 429...)
-            echo "DEAD: $p (code=$code)"
+            [ "$VERBOSE" = "yes" ] && echo "DEAD: $p (code=$code)"
             N_DEAD=$((N_DEAD + 1))
             ;;
     esac
