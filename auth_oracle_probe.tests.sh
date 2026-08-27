@@ -130,6 +130,28 @@ assert_not_contains() {
     fi
 }
 
+# capget <logfile> <method> <index0> <field>
+#   field = "body" or "header:NAME". Prints the value, or <ABSENT>/<NOREC>/<NOLOG>.
+#   Reads the JSONL capture written by the mock's _record.
+capget() {
+    python3 - "$1" "$2" "$3" "$4" << 'PY'
+import sys, json
+log, method, idx, field = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+try:
+    recs = [json.loads(l) for l in open(log) if l.strip()]
+except FileNotFoundError:
+    print("<NOLOG>"); sys.exit(0)
+sel = [r for r in recs if r["method"] == method]
+if idx >= len(sel):
+    print("<NOREC>"); sys.exit(0)
+r = sel[idx]
+if field == "body":
+    print(r["body"])
+elif field.startswith("header:"):
+    print(r["headers"].get(field.split(":", 1)[1].lower(), "<ABSENT>"))
+PY
+}
+
 # ------------------------------------------------------------------------------
 # CATEGORY 1: Unit tests (helper functions)
 # ------------------------------------------------------------------------------
@@ -249,6 +271,14 @@ assert_eq "T17" "get_header: Location extracted (case-insensitive header name)" 
 assert_eq "T18" "get_header: Content-Type extracted" \
     "text/html" "$(get_header gh Content-Type)"
 
+# --- authority: default-port omission (T78-T81) ---
+
+HOST="10.0.0.1"
+SCHEME="http";  PORT="80";   assert_eq "T78" "authority: http:80 omits port"    "http://10.0.0.1"       "$(authority)"
+SCHEME="https"; PORT="443";  assert_eq "T79" "authority: https:443 omits port"  "https://10.0.0.1"      "$(authority)"
+SCHEME="http";  PORT="8080"; assert_eq "T80" "authority: http:8080 keeps port"  "http://10.0.0.1:8080"  "$(authority)"
+SCHEME="https"; PORT="8443"; assert_eq "T81" "authority: https:8443 keeps port" "https://10.0.0.1:8443" "$(authority)"
+
 rm -rf "$WORK_DIR"
 WORK_DIR=""
 
@@ -271,9 +301,11 @@ else
 
     cat > "$FIXTURE_DIR/server.py" << 'PYEOF'
 import sys
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 PORT = int(sys.argv[1])
+CAPTURE = sys.argv[2] if len(sys.argv) > 2 else None
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a, **k): pass
@@ -292,6 +324,14 @@ class H(BaseHTTPRequestHandler):
     def _read_body(self):
         n = int(self.headers.get('Content-Length', 0))
         return self.rfile.read(n).decode('utf-8', errors='replace') if n else ''
+
+    def _record(self, method, body):
+        if CAPTURE:
+            rec = {"method": method, "path": self.path,
+                   "headers": {k.lower(): v for k, v in self.headers.items()},
+                   "body": body}
+            with open(CAPTURE, "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
 
     def do_GET(self):
         p = self.path
@@ -322,6 +362,10 @@ class H(BaseHTTPRequestHandler):
             self._write(200, b); return
         if p == '/':
             b = b'<html><body><nav><a href="/content/login">Login</a></nav></body></html>'
+            self._write(200, b); return
+        if p == '/capture/login':
+            self._record('GET', '')
+            b = b'<html><body><form method="POST" action="/capture/login"><input name="email"><input name="password" type="password"></form>login</body></html>'
             self._write(200, b); return
         self.send_response(404); self.end_headers()
 
@@ -371,6 +415,11 @@ class H(BaseHTTPRequestHandler):
             self.send_response(500); self.end_headers()
             self.wfile.write(b'Internal Server Error'); return
 
+        if p == '/capture/login':
+            self._record('POST', body_raw)
+            b = b'<html><body><div class="alert-danger">Invalid.</div><form method="POST" action="/capture/login"><input name="email"><input name="password" type="password"></form></body></html>'
+            self._write(200, b); return
+
         if p == '/basic/':
             # If script erroneously POSTs to basic-auth path (should skip after
             # baseline classification), respond 401 without WWW-Authenticate to
@@ -383,7 +432,7 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(('', PORT), H).serve_forever()
 PYEOF
 
-    python3 "$FIXTURE_DIR/server.py" "$PORT_UT" &
+    python3 "$FIXTURE_DIR/server.py" "$PORT_UT" "$FIXTURE_DIR/capture.log" &
     SERVER_PID=$!
     sleep 1
 
@@ -558,6 +607,74 @@ PYEOF
         --login-path=/ --form-action=/ --user-field=x --pass-field=y 2>&1)
     assert_contains "T50" "UNREACHABLE: dead port → BAIL: baseline GET failed" \
         "BAIL: baseline GET failed" "$unreachable_out"
+
+    # ---------------- Browser headers + forwarded state (T63-T77) ----------------
+    CAP="$FIXTURE_DIR/capture.log"
+
+    # Scenario A: all forwarded-state flags set
+    : > "$CAP"
+    capA_out=$(bash "$SCRIPT" --host=localhost --port="$PORT_UT" \
+        --login-path=/capture/login --form-action=/capture/login \
+        --user-field=email --pass-field=password \
+        --cookies="SESS=abc; foo=bar" --hidden-fields="csrf=a%2Bb&nonce=xyz" \
+        --extra-headers="X-CSRF-Token: tok" 2>/dev/null)
+
+    # GET asymmetry: baseline GET carries UA only (no Referer/Origin)
+    assert_contains "T63" "GET sends Chrome UA" "Chrome/121" "$(capget "$CAP" GET 0 header:user-agent)"
+    assert_eq "T64" "GET omits Referer (asymmetry)" "<ABSENT>" "$(capget "$CAP" GET 0 header:referer)"
+    assert_eq "T65" "GET omits Origin (asymmetry)" "<ABSENT>" "$(capget "$CAP" GET 0 header:origin)"
+
+    # POST always-on browser headers
+    assert_contains "T66" "POST sends Chrome UA" "Chrome/121" "$(capget "$CAP" POST 0 header:user-agent)"
+    assert_eq "T67" "POST Referer = login-page URL" "http://localhost:$PORT_UT/capture/login" "$(capget "$CAP" POST 0 header:referer)"
+    assert_eq "T68" "POST Origin = scheme://host:port" "http://localhost:$PORT_UT" "$(capget "$CAP" POST 0 header:origin)"
+
+    # Forwarded-state flags thread into sampling POST
+    assert_eq "T69" "--cookies threads to sampling POST" "SESS=abc; foo=bar" "$(capget "$CAP" POST 0 header:cookie)"
+    assert_eq "T70" "--extra-headers threads to sampling POST" "tok" "$(capget "$CAP" POST 0 header:x-csrf-token)"
+    assert_contains "T71" "--hidden-fields in sampling POST body" "csrf=a%2Bb&nonce=xyz" "$(capget "$CAP" POST 0 body)"
+    assert_not_contains "T72" "hidden-fields NOT double-encoded" "a%252Bb" "$(capget "$CAP" POST 0 body)"
+
+    # Emitted oracle carries the same browser headers + forwarded state
+    : > "$CAP"
+    oracleA=$(printf '%s' "$capA_out" | grep '^ORACLE_CURL_SUCCESS_TEST:' | sed 's/^ORACLE_CURL_SUCCESS_TEST: //')
+    if [ -z "$oracleA" ]; then
+        _fail "T73" "emitted oracle carries browser headers" "no oracle line"
+        _fail "T74" "emitted oracle carries forwarded state" "no oracle line"
+    else
+        URL="http://localhost:$PORT_UT/capture/login"; U="admin@x.com"; P="pw"
+        eval "$oracleA" >/dev/null 2>&1 || true
+        o_ua=$(capget "$CAP" POST 0 header:user-agent)
+        o_ref=$(capget "$CAP" POST 0 header:referer)
+        o_org=$(capget "$CAP" POST 0 header:origin)
+        if printf '%s' "$o_ua" | grep -qF "Chrome/121" \
+            && [ "$o_ref" = "http://localhost:$PORT_UT/capture/login" ] \
+            && [ "$o_org" = "http://localhost:$PORT_UT" ]; then
+            _pass "T73" "emitted oracle carries browser headers (UA/Referer/Origin)"
+        else
+            _fail "T73" "emitted oracle carries browser headers (UA/Referer/Origin)" \
+                "ua='$o_ua' ref='$o_ref' org='$o_org'"
+        fi
+        o_ck=$(capget "$CAP" POST 0 header:cookie)
+        o_body=$(capget "$CAP" POST 0 body)
+        if [ "$o_ck" = "SESS=abc; foo=bar" ] && printf '%s' "$o_body" | grep -qF "csrf=a%2Bb&nonce=xyz"; then
+            _pass "T74" "emitted oracle carries forwarded state (cookies + hidden fields)"
+        else
+            _fail "T74" "emitted oracle carries forwarded state (cookies + hidden fields)" \
+                "cookie='$o_ck' body='$o_body'"
+        fi
+    fi
+
+    # Scenario B: no forwarded-state flags → clean empty path
+    : > "$CAP"
+    capB_out=$(bash "$SCRIPT" --host=localhost --port="$PORT_UT" \
+        --login-path=/capture/login --form-action=/capture/login \
+        --user-field=email --pass-field=password 2>/dev/null)
+    assert_eq "T75" "empty --cookies → no Cookie header on POST" "<ABSENT>" "$(capget "$CAP" POST 0 header:cookie)"
+
+    # Preambles present on stdout
+    assert_contains "T76" "config-echo preamble present" "run config" "$capB_out"
+    assert_contains "T77" "coverage-warnings preamble present" "COVERAGE WARNINGS" "$capB_out"
 fi
 
 # ------------------------------------------------------------------------------

@@ -75,12 +75,16 @@
 #   patterns (case-insensitive substring) → BAIL with RATE_LIMITED marker
 #   before contamination. Operator increases --delay and re-runs.
 #
-# CSRF interaction:
-#   NOT SUPPORTED. If Pre-flight CSRF sub-block found tokens, do NOT run this
-#   script — escalate to Burp per Automating Fresh State in Burp. Caller's
-#   responsibility to gate; script does not verify token absence. Token-per-
-#   request forms need session-handling state incompatible with stateless
-#   scripted probing.
+# CSRF / forwarded static state:
+#   SUPPORTED for STATIC carriers. Statefulness Probe (WAC 1.6) classifies each
+#   cookie / hidden field (incl. any CSRF token) as static or rotating. On
+#   ROUTE: shell it forwards the static values; the caller passes them via
+#   --cookies / --hidden-fields and this script bakes them into both its samples
+#   and the emitted oracle. ROTATING carriers → Probe emits ROUTE: burp and this
+#   script is NOT invoked → escalate to Burp per Automating Fresh State in Burp
+#   (rotating tokens need per-request session-handling, incompatible with
+#   stateless scripted probing). Gate is Probe's ROUTE; this script does not
+#   re-verify token presence or rotation.
 #
 # Wrong-credential values used (constants, not configurable):
 #   User A: "xyzabc123xxx@invalid.test"    Pass A: "wrong_ZZZ_9999"
@@ -106,6 +110,11 @@ set -u
 # ------------------------------------------------------------------------------
 
 TIMEOUT_SEC=10
+
+# Chrome UA — curl's default UA trips WAF UA filters. Sent on every request
+# (GET UA-only; POST adds Referer+Origin — see sample_get / sample_post).
+# MUST stay byte-identical to statefulness_probe.sh BROWSER_UA (drift-warning).
+BROWSER_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
 FAIL_A_USER="xyzabc123xxx@invalid.test"
 FAIL_A_PASS="wrong_ZZZ_9999"
@@ -137,6 +146,25 @@ SCHEME="http"
 DELAY_MS=0
 VERBOSE=no
 
+# Forwarded state from Statefulness Probe (WAC 1.6). Empty = none forwarded.
+#   COOKIES        — browser Cookie format "n1=v1; n2=v2" (STATIC_COOKIES) → curl -b
+#   HIDDEN_FIELDS  — POST-body format "n1=v1&n2=v2", values already URL-encoded
+#                    (STATIC_HIDDEN_FIELDS) → curl --data (raw; NOT --data-urlencode,
+#                    which would double-encode the already-encoded values)
+#   EXTRA_HEADERS  — single operator-supplied header "Name: value" → curl -H
+COOKIES=""
+HIDDEN_FIELDS=""
+EXTRA_HEADERS=""
+
+# Derived from parsed args (set in main, after parse_args). Consumed by
+# sample_post AND all emit_oracle_* functions — centralised so the emitted
+# oracle POSTs with byte-identical headers to what the probe sampled with.
+# AUTHORITY omits the scheme-default port (80/http, 443/https) to match browser
+# URL serialization; REFERER/ORIGIN and the connection URLs all derive from it.
+AUTHORITY=""
+REFERER=""
+ORIGIN=""
+
 # WORK_DIR — mktemp'd directory; per-sample files stored here as
 # <name>.body, <name>.hdr, <name>.meta. Trap-cleaned on exit.
 WORK_DIR=""
@@ -158,6 +186,7 @@ usage() {
     cat >&2 <<'EOF'
 Usage: auth_oracle_probe.sh --host=<h> --port=<p> --login-path=<p> \
                             --form-action=<p> --user-field=<f> --pass-field=<f> \
+                            [--cookies=<s>] [--hidden-fields=<s>] [--extra-headers=<s>] \
                             [--scheme=<http|https>] [--delay=<ms>] [--verbose]
 
 Required flags:
@@ -169,6 +198,13 @@ Required flags:
   --pass-field=<f>    Login form password field name (e.g., password)
 
 Optional flags:
+  --cookies=<s>       Forwarded static cookies, browser Cookie format
+                      "n1=v1; n2=v2" (Statefulness Probe STATIC_COOKIES). curl -b.
+  --hidden-fields=<s> Forwarded static hidden fields, POST-body format
+                      "n1=v1&n2=v2", values already URL-encoded (Statefulness
+                      Probe STATIC_HIDDEN_FIELDS). curl --data (raw).
+  --extra-headers=<s> One operator-supplied header "Name: value" (e.g. a
+                      JS-set X-CSRF-Token manually extracted). curl -H.
   --scheme=<s>        URL scheme: http (default) or https
   --delay=<ms>        Milliseconds between sample requests (default 0).
                       Set from Credential Attacks Pre-flight rate-limit result.
@@ -193,6 +229,9 @@ parse_args() {
             --form-action=*)  FORM_ACTION="${1#--form-action=}"; shift ;;
             --user-field=*)   USER_FIELD="${1#--user-field=}"; shift ;;
             --pass-field=*)   PASS_FIELD="${1#--pass-field=}"; shift ;;
+            --cookies=*)      COOKIES="${1#--cookies=}"; shift ;;
+            --hidden-fields=*) HIDDEN_FIELDS="${1#--hidden-fields=}"; shift ;;
+            --extra-headers=*) EXTRA_HEADERS="${1#--extra-headers=}"; shift ;;
             --scheme=*)       SCHEME="${1#--scheme=}"; shift ;;
             --delay=*)        DELAY_MS="${1#--delay=}"; shift ;;
             --verbose)        VERBOSE=yes; shift ;;
@@ -235,31 +274,57 @@ setup_workdir() {
 # HTTP sampling
 # ------------------------------------------------------------------------------
 
+# authority — scheme://host[:port], omitting the port when it is the scheme
+# default (80 for http, 443 for https), matching how browsers serialize URLs
+# (and thus Referer/Origin). Connection URLs use it too: http://host and
+# http://host:80 hit the same endpoint, so omission is connection-safe.
+authority() {
+    if { [ "$SCHEME" = "http" ]  && [ "$PORT" = "80" ]; } || \
+       { [ "$SCHEME" = "https" ] && [ "$PORT" = "443" ]; }; then
+        printf '%s://%s' "$SCHEME" "$HOST"
+    else
+        printf '%s://%s:%s' "$SCHEME" "$HOST" "$PORT"
+    fi
+}
+
 # sample_get <path> <name> — GET path, store body/hdr/meta under <name>.*
 sample_get() {
     local path="$1" name="$2"
-    local url="${SCHEME}://${HOST}:${PORT}${path}"
+    local url="${AUTHORITY}${path}"
     curl -s -k \
          -o "${WORK_DIR}/${name}.body" \
          -D "${WORK_DIR}/${name}.hdr" \
          --max-time "$TIMEOUT_SEC" \
+         -H "User-Agent: $BROWSER_UA" \
          -w 'status=%{http_code}|size=%{size_download}|redirect=%{redirect_url}|type=%{content_type}\n' \
          "$url" > "${WORK_DIR}/${name}.meta" 2>/dev/null
     return $?
 }
 
 # sample_post <user> <pass> <name> — POST form-action with user/pass, store as <name>.*
+# Always-on browser headers (UA/Referer/Origin). Forwarded state (cookies /
+# hidden fields / extra header) appended only when non-empty — MUST match the
+# emitted oracle's baked flags (see emit_extra_flags) so the probe samples the
+# same request the attack will send.
 sample_post() {
     local user="$1" pass="$2" name="$3"
-    local url="${SCHEME}://${HOST}:${PORT}${FORM_ACTION}"
-    curl -s -k -X POST \
-         -o "${WORK_DIR}/${name}.body" \
-         -D "${WORK_DIR}/${name}.hdr" \
-         --max-time "$TIMEOUT_SEC" \
-         --data-urlencode "${USER_FIELD}=${user}" \
-         --data-urlencode "${PASS_FIELD}=${pass}" \
-         -w 'status=%{http_code}|size=%{size_download}|redirect=%{redirect_url}|type=%{content_type}\n' \
-         "$url" > "${WORK_DIR}/${name}.meta" 2>/dev/null
+    local url="${AUTHORITY}${FORM_ACTION}"
+    local args=(
+        -s -k -X POST
+        -o "${WORK_DIR}/${name}.body"
+        -D "${WORK_DIR}/${name}.hdr"
+        --max-time "$TIMEOUT_SEC"
+        -H "User-Agent: $BROWSER_UA"
+        -H "Referer: $REFERER"
+        -H "Origin: $ORIGIN"
+    )
+    [ -n "$COOKIES" ]       && args+=(-b "$COOKIES")
+    [ -n "$EXTRA_HEADERS" ] && args+=(-H "$EXTRA_HEADERS")
+    args+=(--data-urlencode "${USER_FIELD}=${user}" --data-urlencode "${PASS_FIELD}=${pass}")
+    # Hidden fields arrive pre-URL-encoded → --data (raw), not --data-urlencode.
+    [ -n "$HIDDEN_FIELDS" ] && args+=(--data "$HIDDEN_FIELDS")
+    args+=(-w 'status=%{http_code}|size=%{size_download}|redirect=%{redirect_url}|type=%{content_type}\n')
+    curl "${args[@]}" "$url" > "${WORK_DIR}/${name}.meta" 2>/dev/null
     return $?
 }
 
@@ -485,6 +550,22 @@ extract_location_path() {
     printf '%s' "$1" | sed -E 's|^https?://[^/]+||' | cut -d'?' -f1
 }
 
+# emit_hdr_flags — " -b <q> -H <q>" for forwarded cookies / extra-header, or
+# empty. %q-escaped so the values re-parse correctly when the operator pastes
+# the emitted oracle into bash. Placed among headers to mirror sample_post.
+emit_hdr_flags() {
+    local seg=""
+    [ -n "$COOKIES" ]       && seg+=" -b $(printf '%q' "$COOKIES")"
+    [ -n "$EXTRA_HEADERS" ] && seg+=" -H $(printf '%q' "$EXTRA_HEADERS")"
+    printf '%s' "$seg"
+}
+
+# emit_data_flags — " --data <q>" for forwarded hidden fields (pre-URL-encoded),
+# or empty. Appended after user/pass data to mirror sample_post.
+emit_data_flags() {
+    [ -n "$HIDDEN_FIELDS" ] && printf ' --data %s' "$(printf '%q' "$HIDDEN_FIELDS")"
+}
+
 # emit_oracle_redirect — REDIRECT-class oracles.
 # Fail sample was a 3xx to a login-ish path (query stripped = LOGIN_PATH prefix).
 # Success = 3xx to a path NOT under LOGIN_PATH's prefix.
@@ -502,8 +583,8 @@ emit_oracle_redirect() {
     echo "ORACLE_FFUF: -r -fr '${login_form_marker}'"
     # curl fragment: capture immediate redirect URL, check its path does not
     # start with the fail Location's path (i.e., the redirect leaves login zone)
-    printf 'ORACLE_CURL_SUCCESS_TEST: R=$(curl -s -k -o /dev/null -w '\''%%{redirect_url}'\'' -X POST --data-urlencode "%s=$U" --data-urlencode "%s=$P" "$URL") && [ -n "$R" ] && ! printf '\''%%s'\'' "$R" | grep -qE '\''^https?://[^/]+%s'\''\n' \
-        "$USER_FIELD" "$PASS_FIELD" "$fail_loc_path"
+    printf 'ORACLE_CURL_SUCCESS_TEST: R=$(curl -s -k -o /dev/null -w '\''%%{redirect_url}'\'' -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s "$URL") && [ -n "$R" ] && ! printf '\''%%s'\'' "$R" | grep -qE '\''^https?://[^/]+%s'\''\n' \
+        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)" "$fail_loc_path"
 }
 
 # emit_oracle_content — CONTENT-class oracles.
@@ -521,8 +602,8 @@ emit_oracle_content() {
     echo "ORACLE_FFUF: -mc 301,302,303,307,308"
     # Match 3xx explicitly (not "!= 200") — prevents 429/500/anomalous mid-attack
     # responses from triggering false SUCCESS.
-    printf 'ORACLE_CURL_SUCCESS_TEST: STATUS=$(curl -s -k -o /dev/null -w '\''%%{http_code}'\'' -X POST --data-urlencode "%s=$U" --data-urlencode "%s=$P" "$URL"); [[ "$STATUS" =~ ^3[0-9][0-9]$ ]]\n' \
-        "$USER_FIELD" "$PASS_FIELD"
+    printf 'ORACLE_CURL_SUCCESS_TEST: STATUS=$(curl -s -k -o /dev/null -w '\''%%{http_code}'\'' -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s "$URL"); [[ "$STATUS" =~ ^3[0-9][0-9]$ ]]\n' \
+        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)"
 }
 
 # emit_oracle_api — API/JSON-class oracles.
@@ -530,8 +611,8 @@ emit_oracle_content() {
 emit_oracle_api() {
     echo "ORACLE_HYDRA: S=\"token\""
     echo "ORACLE_FFUF: -mc 200"
-    printf 'ORACLE_CURL_SUCCESS_TEST: [ "$(curl -s -k -o /dev/null -w '\''%%{http_code}'\'' -X POST --data-urlencode "%s=$U" --data-urlencode "%s=$P" "$URL")" = "200" ]\n' \
-        "$USER_FIELD" "$PASS_FIELD"
+    printf 'ORACLE_CURL_SUCCESS_TEST: [ "$(curl -s -k -o /dev/null -w '\''%%{http_code}'\'' -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s "$URL")" = "200" ]\n' \
+        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)"
 }
 
 # emit_oracle_basic — BASIC-class routing marker. No oracles.
@@ -582,8 +663,59 @@ dispatch() {
     esac
 }
 
+# emit_run_config — boxed run-config preamble (stdout, emitted first on every
+# run incl. bail paths). Makes always-on headers visible (never in invocation)
+# and echoes forwarded-state flags as name=value (empty → (none)). Flag-name
+# keys mirror the CLI vocabulary so the echo reads like the invocation.
+emit_run_config() {
+    echo "=============================================================================="
+    echo " auth_oracle_probe.sh — run config"
+    echo "=============================================================================="
+    echo " Target        : ${AUTHORITY}"
+    echo " Login path    : ${LOGIN_PATH}   (GET, sampled first)"
+    echo " Form action   : ${FORM_ACTION}   (POST, wrong-cred samples)"
+    echo " Fields        : ${USER_FIELD} / ${PASS_FIELD}"
+    echo " Delay         : ${DELAY_MS} ms"
+    echo ""
+    echo " Always-on headers (every POST):"
+    echo "   User-Agent  : ${BROWSER_UA}"
+    echo "   Referer     : ${REFERER}"
+    echo "   Origin      : ${ORIGIN}"
+    echo ""
+    echo " Forwarded state (from Statefulness Probe; passed via flags):"
+    echo "   --cookies       : ${COOKIES:-(none)}"
+    echo "   --hidden-fields : ${HIDDEN_FIELDS:-(none)}"
+    echo "   --extra-headers : ${EXTRA_HEADERS:-(none)}"
+    echo ""
+    echo " Side-effect     : issues up to 3 wrong-cred POSTs to ${FORM_ACTION}"
+    echo "                   → counts toward any per-IP failed-attempt threshold"
+    echo "=============================================================================="
+    echo ""
+}
+
+# emit_coverage_warnings — boxed, informational; always emitted (self-contained
+# so an operator entering cold sees every gap without relying on the Statefulness
+# Probe preamble upstream). These do not change CLASS or the emitted oracle; they
+# are conditions under which the oracle can be silently wrong.
+emit_coverage_warnings() {
+    echo "=============================================================================="
+    echo "COVERAGE WARNINGS (informational — always emitted; may silently invalidate the oracle below)"
+    echo "=============================================================================="
+    echo "- CAPTCHA / anti-bot on the login page not defeatable shell-side — samples hit the challenge, oracle is garbage; if visible, escalate to Burp + manual browser."
+    echo "- JS-computed POST fields (client-side nonce/HMAC/signature) not detectable — samples and attack both fail for the wrong reason; inspect form JS in browser dev tools if oracle underperforms."
+    echo "- Multi-step / gated success (email-verify, MFA after first factor) not detectable — success and fail may both redirect; if login is multi-step, verify a real success manually first."
+    echo "- POST-gated WAF not detectable (Statefulness Probe is GET-only) — may 403 (loud BAIL) or return a 200 interstitial (silent garbage oracle); if hits are implausible, inspect a raw sample in Burp."
+    echo "=============================================================================="
+    echo ""
+}
+
 main() {
     parse_args "$@"
+    AUTHORITY="$(authority)"
+    REFERER="${AUTHORITY}${LOGIN_PATH}"
+    ORIGIN="${AUTHORITY}"
+    emit_run_config
+    emit_coverage_warnings
     setup_workdir
     sample_all
     classify
