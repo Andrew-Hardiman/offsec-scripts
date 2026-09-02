@@ -338,6 +338,9 @@ class H(BaseHTTPRequestHandler):
         if p == '/content/login':
             b = b'<html><body><nav><a href="/content/login">Login</a></nav><form method="POST" action="/content/login"><input name="email"><input name="password" type="password"></form></body></html>'
             self._write(200, b); return
+        if p == '/content200/login':
+            b = b'<html><body><nav><a href="/content200/login">Login</a></nav><form method="POST" action="/content200/login"><input name="email"><input name="password" type="password"></form></body></html>'
+            self._write(200, b); return
         if p == '/redirect/login':
             b = b'<html><body><nav><a href="/redirect/login">Login</a></nav><form method="POST" action="/redirect/login"><input name="user"><input name="pass" type="password"></form></body></html>'
             self._write(200, b); return
@@ -385,6 +388,14 @@ class H(BaseHTTPRequestHandler):
                 self.send_header('Location', '/content/dashboard')
                 self.end_headers(); return
             b = b'<html><body><nav><a href="/content/login">Login</a></nav><div class="alert-danger">Invalid email or password.</div><form method="POST" action="/content/login"><input name="email"><input name="password" type="password"></form></body></html>'
+            self._write(200, b); return
+
+        if p == '/content200/login':
+            u = f.get('email', [''])[0]; pw = f.get('password', [''])[0]
+            if u == 'admin@x.com' and pw == 'admin':
+                b = b'<html><body><nav><a href="/content200/logout">Logout</a></nav><h1>Dashboard</h1><p>Welcome admin</p></body></html>'
+                self._write(200, b); return
+            b = b'<html><body><nav><a href="/content200/login">Login</a></nav><div class="alert-danger">Invalid email or password.</div><form method="POST" action="/content200/login"><input name="email"><input name="password" type="password"></form></body></html>'
             self._write(200, b); return
 
         if p == '/redirect/login':
@@ -451,11 +462,11 @@ PYEOF
     assert_contains "T20" "CONTENT: FAIL_STATUS 200" "FAIL_STATUS: 200" "$content_out"
     assert_contains "T21" "CONTENT: FAIL_SIGNAL_CANDIDATE contains 'Invalid email or password.'" \
         "Invalid email or password." "$content_out"
-    assert_contains "T22" "CONTENT: UNAUTH_MARKER present" "UNAUTH_MARKER:" "$content_out"
-    assert_contains "T23" "CONTENT: ORACLE_HYDRA emitted with F=" \
-        "ORACLE_HYDRA: F=" "$content_out"
-    assert_contains "T24" "CONTENT: ORACLE_FFUF matches 3xx codes" \
-        "ORACLE_FFUF: -mc 301,302,303,307,308" "$content_out"
+    assert_contains "T22" "CONTENT: FAIL_MARKER_CANDIDATE present" "FAIL_MARKER_CANDIDATE:" "$content_out"
+    assert_not_contains "T23" "CONTENT: no ORACLE_HYDRA (Hydra dropped)" \
+        "ORACLE_HYDRA" "$content_out"
+    assert_contains "T24" "CONTENT: ORACLE_FFUF filter-the-fail (-fmode and)" \
+        "-fmode and" "$content_out"
     assert_contains "T25" "CONTENT: ORACLE_SUMMARY class=content confidence=high" \
         "ORACLE_SUMMARY: class=content confidence=high" "$content_out"
 
@@ -494,10 +505,10 @@ PYEOF
     assert_contains "T29" "REDIRECT: FAIL_STATUS 302" "FAIL_STATUS: 302" "$redirect_out"
     assert_contains "T30" "REDIRECT: FAIL_LOCATION points to /redirect/login" \
         "FAIL_LOCATION: /redirect/login" "$redirect_out"
-    assert_contains "T31" "REDIRECT: ORACLE_HYDRA F=name=\"user\"" \
-        'ORACLE_HYDRA: F=name="user"' "$redirect_out"
-    assert_contains "T32" "REDIRECT: ORACLE_FFUF uses -r -fr" \
-        "ORACLE_FFUF: -r -fr" "$redirect_out"
+    assert_not_contains "T31" "REDIRECT: no ORACLE_HYDRA (Hydra dropped)" \
+        "ORACLE_HYDRA" "$redirect_out"
+    assert_contains "T32" "REDIRECT: ORACLE_FFUF matches immediate Location (no -r)" \
+        "-fr 'Location:" "$redirect_out"
     assert_contains "T33" "REDIRECT: ORACLE_SUMMARY class=redirect" \
         "ORACLE_SUMMARY: class=redirect" "$redirect_out"
 
@@ -535,9 +546,9 @@ PYEOF
     assert_contains "T37" "API: FAIL_STATUS 401" "FAIL_STATUS: 401" "$api_out"
     assert_contains "T38" "API: FAIL_CONTENT_TYPE contains json" \
         "FAIL_CONTENT_TYPE: application/json" "$api_out"
-    assert_contains "T39" "API: ORACLE_HYDRA S=\"token\"" \
-        'ORACLE_HYDRA: S="token"' "$api_out"
-    assert_contains "T40" "API: ORACLE_FFUF -mc 200" "ORACLE_FFUF: -mc 200" "$api_out"
+    assert_not_contains "T39" "API: no ORACLE_HYDRA (Hydra dropped)" \
+        "ORACLE_HYDRA" "$api_out"
+    assert_contains "T40" "API: ORACLE_FFUF filter-the-fail (-fmode and)" "-fmode and" "$api_out"
 
     # API oracle execution (T41-T42)
     curl_test=$(printf '%s' "$api_out" | grep '^ORACLE_CURL_SUCCESS_TEST:' | \
@@ -563,6 +574,26 @@ PYEOF
         fi
     fi
 
+    # ---------------- CONTENT direct-200-success regression (T82-T85) ----------------
+    # Audit's founding defect: fail=200 AND success=200 (no redirect). A status
+    # oracle silently false-negatives; filter-the-fail must discriminate.
+    c200_out=$(bash "$SCRIPT" --host=localhost --port="$PORT_UT" \
+        --login-path=/content200/login --form-action=/content200/login \
+        --user-field=email --pass-field=password 2>&1)
+    assert_contains "T82" "CONTENT200: classified content" "CLASS: content" "$c200_out"
+    assert_not_contains "T83" "CONTENT200: no Hydra oracle" "ORACLE_HYDRA" "$c200_out"
+    c200_ct=$(printf '%s' "$c200_out" | grep '^ORACLE_CURL_SUCCESS_TEST:' | sed 's/^ORACLE_CURL_SUCCESS_TEST: //')
+    if [ -z "$c200_ct" ]; then
+        _fail "T84" "CONTENT200: oracle discriminates 200-success (no FN)" "no oracle line"
+        _fail "T85" "CONTENT200: oracle rejects wrong creds" "no oracle line"
+    else
+        URL="http://localhost:$PORT_UT/content200/login"
+        U="admin@x.com"; P="admin"
+        if eval "$c200_ct"; then _pass "T84" "CONTENT200: oracle discriminates 200-success (no FN)"; else _fail "T84" "CONTENT200: oracle discriminates 200-success (no FN)" "FALSE NEGATIVE on direct-200 success"; fi
+        U="wrong@x.com"; P="wrong"
+        if eval "$c200_ct"; then _fail "T85" "CONTENT200: oracle rejects wrong creds" "false SUCCESS on wrong creds"; else _pass "T85" "CONTENT200: oracle rejects wrong creds"; fi
+    fi
+
     # ---------------- BASIC class (T43-T45) ----------------
 
     basic_out=$(bash "$SCRIPT" --host=localhost --port="$PORT_UT" \
@@ -575,7 +606,7 @@ PYEOF
     # Basic-auth short-circuits BEFORE POST samples, so content-class markers
     # (which are only emitted after fail sample analysis) must be absent.
     assert_not_contains "T45" "BASIC: no FAIL_SIGNAL_CANDIDATE (POST samples skipped)" \
-        "FAIL_SIGNAL_CANDIDATE" "$basic_out"
+        "FAIL_MARKER_CANDIDATE" "$basic_out"
 
     # ---------------- Rate limit self-defense (T46-T48) ----------------
 

@@ -25,24 +25,36 @@
 #     FAIL_CONTENT_TYPE: <mime>
 #     FAIL_SIZE: <bytes>
 #
-#   Derived oracles (per class — ready-to-paste snippets):
-#     ORACLE_HYDRA: F=<string>   (or S=<string> for api class)
-#         Substring match on final response body after Hydra follows redirects.
-#     ORACLE_FFUF: <flag block>
-#         Matcher/filter flags for ffuf. May include -r (follow redirects).
+#   Derived oracles (two dialects, ONE strategy — ready-to-paste snippets):
+#     Both dialects encode the same "filter-the-observed-fail" oracle, generated
+#     from the fail signature derived across fail_a + fail_b (see below). A
+#     response is a FAILURE iff it matches the fail signature; anything else is a
+#     SUCCESS candidate for mandatory manual verification (Section 6). This is
+#     high-recall by design (false negatives are unrecoverable; false positives
+#     are caught at verify) — it does NOT assume the success shape, so it handles
+#     direct-200-success (dashboard rendered inline, no redirect) where a
+#     status-only oracle silently false-negatives.
+#     ORACLE_FFUF: <flag block>          (for Sections 2-5, wordlist scale)
+#         Filter-the-fail: -mc all + AND-mode filters on the fail signature
+#         (-fc/-fr, or -fc/-fs). Redirect class matches the immediate Location
+#         header (no -r). Flag semantics CONFIRMED on ffuf v2.1.0-dev
+#         (2026-08-29): filter-the-fail and immediate-Location matching both
+#         behave as designed; -r-follow body-matching does NOT (do not switch to
+#         it). Re-confirm after any ffuf upgrade — this behaviour is version-
+#         specific (see the dated notes on each ORACLE_FFUF line below).
 #     ORACLE_CURL_SUCCESS_TEST: <shell test expression>
-#         Bash test expression using $U, $P, $URL. Exit 0 iff response = SUCCESS.
-#         Used by Credential Attacks Section 1 default-creds loop. Requires
-#         bash (uses [[ =~ ]] regex match); the vault's Section 1 loop is bash.
+#         Bash test using $U, $P, $URL. Exit 0 iff response = SUCCESS candidate.
+#         Single request/attempt. Used by Credential Attacks Section 1 (default
+#         creds loop) and Section 6 (verify). Requires bash; the vault runs bash.
+#     (No Hydra dialect. Hydra dropped: its condition is one-dimensional and its
+#     redirect handling is version-fragile — dominated by ffuf here.)
 #
-#   Content-class supplementary markers (emitted only for CLASS: content):
-#     UNAUTH_MARKER: "<string>"
-#         Token stable across baseline + fail samples + public page. Used as
-#         F= value in ORACLE_HYDRA. Highest-EV candidate first.
-#     FAIL_SIGNAL_CANDIDATE: "<string>"
-#         Token stable across fail_a + fail_b, absent from baseline AND
-#         absent from empty-field validation response. Multiple emitted.
-#         Alternative oracle for manual pivot if primary oracle underperforms.
+#   Supplementary markers (emitted for CLASS: content and api):
+#     FAIL_MARKER_CANDIDATE: "<string>"
+#         Token stable across fail_a + fail_b (NO baseline/empty-cred
+#         subtraction — login-form tokens are the strongest success
+#         discriminator and are kept, ranked first). Up to 5 emitted, ranked;
+#         alternative markers for manual pivot if the primary underperforms.
 #
 #   Basic-auth routing marker (mutually exclusive with oracles):
 #     ROUTE_OUT: Login Bypass Techniques Basic Auth section
@@ -485,59 +497,57 @@ tokenize() {
         | grep -v '^$' | sort -u
 }
 
-# derive_content_markers — populate token files under WORK_DIR for later emission
-derive_content_markers() {
-    tokenize "${WORK_DIR}/baseline.body" > "${WORK_DIR}/baseline.tok"
-    tokenize "${WORK_DIR}/fail_a.body"   > "${WORK_DIR}/fail_a.tok"
-    tokenize "${WORK_DIR}/fail_b.body"   > "${WORK_DIR}/fail_b.tok"
-    tokenize "${WORK_DIR}/fail_c.body"   > "${WORK_DIR}/fail_c.tok"
-    if [ -f "${WORK_DIR}/public.body" ]; then
-        tokenize "${WORK_DIR}/public.body" > "${WORK_DIR}/public.tok"
-    else
-        : > "${WORK_DIR}/public.tok"
-    fi
+# shq <string> — single-quote a string so it re-parses safely when the emitted
+# oracle is pasted into bash (handles embedded single quotes via '\'' idiom).
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
-    # Fail-signal candidates: (fail_a ∩ fail_b) − baseline − fail_c
-    comm -12 "${WORK_DIR}/fail_a.tok" "${WORK_DIR}/fail_b.tok" > "${WORK_DIR}/_ab.tok"
-    comm -23 "${WORK_DIR}/_ab.tok" "${WORK_DIR}/baseline.tok"  > "${WORK_DIR}/_ab_minus_base.tok"
-    comm -23 "${WORK_DIR}/_ab_minus_base.tok" "${WORK_DIR}/fail_c.tok" \
-        > "${WORK_DIR}/fail_signal_candidates.tok"
+# derive_fail_signature — derive the observed-fail signature from the TWO
+# wrong-cred POST samples (fail_a, fail_b). The probe never sees a success, so
+# the oracle is grounded in what IS observed: tokens stable across two DIFFERENT
+# wrong-cred attempts. A real success must differ from this (or the app itself
+# could not distinguish success from failure). No baseline/empty-cred
+# subtraction — the login-form tokens are the strongest success-discriminator
+# (present on every failure, absent on a post-login page), so they are KEPT and
+# ranked first. Populates G_FAIL_MARKER (may be empty) and G_FAIL_SIZE_STABLE.
+G_FAIL_MARKER=""
+G_FAIL_SIZE_STABLE=""
 
-    # Unauth marker candidates: tokens present in baseline AND fail_a AND (public if available)
-    # Then filter to auth-nav-ish patterns.
-    comm -12 "${WORK_DIR}/baseline.tok" "${WORK_DIR}/fail_a.tok" > "${WORK_DIR}/_base_a.tok"
-    if [ -s "${WORK_DIR}/public.tok" ]; then
-        comm -12 "${WORK_DIR}/_base_a.tok" "${WORK_DIR}/public.tok" > "${WORK_DIR}/_stable_unauth.tok"
-    else
-        cp "${WORK_DIR}/_base_a.tok" "${WORK_DIR}/_stable_unauth.tok"
-    fi
+derive_fail_signature() {
+    tokenize "${WORK_DIR}/fail_a.body" > "${WORK_DIR}/fail_a.tok"
+    tokenize "${WORK_DIR}/fail_b.body" > "${WORK_DIR}/fail_b.tok"
 
-    # Rank candidates: form field markers > login-path hrefs > login-word markers
+    # Stable fail tokens = present in BOTH wrong-cred samples.
+    comm -12 "${WORK_DIR}/fail_a.tok" "${WORK_DIR}/fail_b.tok" > "${WORK_DIR}/fail_stable.tok"
+
+    # Rank: login-form field markers (best — absent on success) > login-path
+    # reference > error-text tokens > any other stable token.
     {
-        grep -E "name=[\"']?${USER_FIELD}[\"']?" "${WORK_DIR}/_stable_unauth.tok" 2>/dev/null
-        grep -E "name=[\"']?${PASS_FIELD}[\"']?" "${WORK_DIR}/_stable_unauth.tok" 2>/dev/null
-        grep -F "$LOGIN_PATH" "${WORK_DIR}/_stable_unauth.tok" 2>/dev/null
-        grep -E "^(Login|Sign In|Sign in|Log In|Log in)$" "${WORK_DIR}/_stable_unauth.tok" 2>/dev/null
-    } | awk '!seen[$0]++' > "${WORK_DIR}/unauth_marker_candidates.tok"
+        grep -E "name=[\"']?${USER_FIELD}[\"']?" "${WORK_DIR}/fail_stable.tok" 2>/dev/null
+        grep -E "name=[\"']?${PASS_FIELD}[\"']?" "${WORK_DIR}/fail_stable.tok" 2>/dev/null
+        grep -F "$LOGIN_PATH" "${WORK_DIR}/fail_stable.tok" 2>/dev/null
+        grep -iE "invalid|incorrect|error|failed|wrong|denied|try again" "${WORK_DIR}/fail_stable.tok" 2>/dev/null
+        cat "${WORK_DIR}/fail_stable.tok" 2>/dev/null
+    } | awk 'NF' | awk '!seen[$0]++' > "${WORK_DIR}/fail_marker_candidates.tok"
+
+    G_FAIL_MARKER=$(head -1 "${WORK_DIR}/fail_marker_candidates.tok" 2>/dev/null)
+
+    # Size stability across the two fail samples. Fragile when the app echoes the
+    # username (the two garbage usernames differ in length → sizes differ), so it
+    # is only used as a fallback and only when the two agree.
+    local sa sb
+    sa=$(get_meta fail_a size); sb=$(get_meta fail_b size)
+    if [ -n "$sa" ] && [ "$sa" = "$sb" ]; then G_FAIL_SIZE_STABLE="$sa"; fi
 }
 
-# emit_content_supplementary — emit UNAUTH_MARKER and FAIL_SIGNAL_CANDIDATE lines
-emit_content_supplementary() {
-    # UNAUTH_MARKER (up to 3)
-    local n=0
-    while IFS= read -r line && [ "$n" -lt 3 ]; do
-        [ "${#line}" -gt 200 ] && line="${line:0:200}..."
-        echo "UNAUTH_MARKER: \"$line\""
-        n=$((n + 1))
-    done < "${WORK_DIR}/unauth_marker_candidates.tok"
-
-    # FAIL_SIGNAL_CANDIDATE (up to 5)
-    n=0
+# emit_fail_supplementary — up to 5 alternative stable fail markers for manual
+# pivot if the primary underperforms.
+emit_fail_supplementary() {
+    local n=0 line
     while IFS= read -r line && [ "$n" -lt 5 ]; do
         [ "${#line}" -gt 200 ] && line="${line:0:200}..."
-        echo "FAIL_SIGNAL_CANDIDATE: \"$line\""
+        echo "FAIL_MARKER_CANDIDATE: \"$line\""
         n=$((n + 1))
-    done < "${WORK_DIR}/fail_signal_candidates.tok"
+    done < "${WORK_DIR}/fail_marker_candidates.tok"
 }
 
 # ------------------------------------------------------------------------------
@@ -566,53 +576,57 @@ emit_data_flags() {
     [ -n "$HIDDEN_FIELDS" ] && printf ' --data %s' "$(printf '%q' "$HIDDEN_FIELDS")"
 }
 
-# emit_oracle_redirect — REDIRECT-class oracles.
-# Fail sample was a 3xx to a login-ish path (query stripped = LOGIN_PATH prefix).
-# Success = 3xx to a path NOT under LOGIN_PATH's prefix.
+# _curl_flags — shared curl POST flag string (browser headers + forwarded state +
+# creds), using $U/$P/$URL placeholders the operator fills. Single source so
+# every emitted oracle POSTs byte-identically to what the probe sampled.
+_curl_flags() {
+    printf -- '-s -k -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s' \
+        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)"
+}
+
+# emit_oracle_redirect — REDIRECT class. Fail redirects to the login zone;
+# success redirects elsewhere. Discriminate by the IMMEDIATE Location path
+# (query-stripped, EXACT match — never prefix), no redirect-following.
+# ffuf flag semantics for the emitted ORACLE_FFUF lines below were CONFIRMED on
+# ffuf v2.1.0-dev (2026-08-29) against a local mock: `-mc all -fmode and` with
+# `-fc`/`-fr`/`-fs` correctly filters the observed fail; `-fr` matches the
+# immediate response's Location header (so the redirect oracle needs no -r).
+# NOTE: `-r`-follow + body-marker filtering did NOT work on that build — do not
+# switch the redirect oracle to a follow strategy. Re-confirm after any ffuf
+# upgrade (behaviour is version-specific).
 emit_oracle_redirect() {
-    local fail_loc_path
+    local fail_loc_path CF
     fail_loc_path=$(extract_location_path "$G_FAIL_LOCATION")
-    [ -z "$fail_loc_path" ] && { echo "BAIL: redirect class but fail Location has empty path"; exit 1; }
-
-    # Login-form marker used by Hydra/ffuf after following redirects.
-    # Followed page = success dashboard (no login form) or the login-with-error
-    # page (has login form). Match on login-form presence = fail.
-    local login_form_marker="name=\"${USER_FIELD}\""
-
-    echo "ORACLE_HYDRA: F=${login_form_marker}"
-    echo "ORACLE_FFUF: -r -fr '${login_form_marker}'"
-    # curl fragment: capture immediate redirect URL, check its path does not
-    # start with the fail Location's path (i.e., the redirect leaves login zone)
-    printf 'ORACLE_CURL_SUCCESS_TEST: R=$(curl -s -k -o /dev/null -w '\''%%{redirect_url}'\'' -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s "$URL") && [ -n "$R" ] && ! printf '\''%%s'\'' "$R" | grep -qE '\''^https?://[^/]+%s'\''\n' \
-        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)" "$fail_loc_path"
+    [ -z "$fail_loc_path" ] && { echo "BAIL: redirect class but fail Location has empty path — escalate to Burp"; return; }
+    CF=$(_curl_flags)
+    G_CONFIDENCE="high"
+    # ffuf: filter responses whose immediate Location header is the fail path
+    # (bounded so a success path sharing the prefix is not filtered). No -r.
+    echo "ORACLE_FFUF: -mc all -fr 'Location:[[:space:]]*${fail_loc_path}([?&#[:space:]]|\$)'"
+    printf 'ORACLE_CURL_SUCCESS_TEST: _L=$(curl %s -o /dev/null -w '\''%%{redirect_url}'\'' "$URL"); _LP=$(printf '\''%%s'\'' "$_L" | sed -E '\''s#^https?://[^/]+##'\'' | cut -d'\''?'\'' -f1); [ "$_LP" != "%s" ]\n' \
+        "$CF" "$fail_loc_path"
 }
 
-# emit_oracle_content — CONTENT-class oracles.
-# Fail = 200 with form re-render. Success = 302 to dashboard (POST-redirect-GET
-# is the modern default). Uses status delta as the primary oracle for ffuf/curl;
-# uses derived unauth-marker for Hydra (Hydra can't match on status).
-emit_oracle_content() {
-    local marker
-    marker=$(head -1 "${WORK_DIR}/unauth_marker_candidates.tok" 2>/dev/null)
-    if [ -n "$marker" ]; then
-        echo "ORACLE_HYDRA: F=${marker}"
+# emit_oracle_body — CONTENT + API classes. Filter-the-observed-fail: a response
+# is a FAILURE iff it matches the fail signature (stable status AND stable marker,
+# or status AND stable size when no marker); anything else is a SUCCESS candidate
+# routed to manual verify. Handles direct-200-success (marker absent on the
+# dashboard) where a status-only oracle silently false-negatives.
+emit_oracle_body() {
+    local CF; CF=$(_curl_flags)
+    if [ -n "$G_FAIL_MARKER" ]; then
+        G_CONFIDENCE="high"
+        echo "ORACLE_FFUF: -mc all -fmode and -fc ${G_FAIL_STATUS} -fr $(shq "$G_FAIL_MARKER")"
+        printf 'ORACLE_CURL_SUCCESS_TEST: _R=$(curl %s -w '\''\\n%%{http_code}'\'' "$URL"); _S=${_R##*$'\''\\n'\''}; ! { [ "$_S" = "%s" ] && grep -qF -- %s <<<"${_R%%$'\''\\n'\''*}"; }\n' \
+            "$CF" "$G_FAIL_STATUS" "$(shq "$G_FAIL_MARKER")"
+    elif [ -n "$G_FAIL_SIZE_STABLE" ]; then
+        G_CONFIDENCE="medium"
+        echo "ORACLE_FFUF: -mc all -fmode and -fc ${G_FAIL_STATUS} -fs ${G_FAIL_SIZE_STABLE}"
+        printf 'ORACLE_CURL_SUCCESS_TEST: _R=$(curl %s -w '\''\\n%%{http_code} %%{size_download}'\'' "$URL"); _tail=${_R##*$'\''\\n'\''}; _S=${_tail%%%% *}; _Z=${_tail##* }; ! { [ "$_S" = "%s" ] && [ "$_Z" = "%s" ]; }\n' \
+            "$CF" "$G_FAIL_STATUS" "$G_FAIL_SIZE_STABLE"
     else
-        echo "ORACLE_HYDRA: (no stable unauth marker derived — use ffuf or curl status oracle instead)"
+        echo "BAIL: no stable fail marker or size across fail_a/fail_b (cannot build a sound oracle) — escalate to Burp Repeater + Comparer"
     fi
-    echo "ORACLE_FFUF: -mc 301,302,303,307,308"
-    # Match 3xx explicitly (not "!= 200") — prevents 429/500/anomalous mid-attack
-    # responses from triggering false SUCCESS.
-    printf 'ORACLE_CURL_SUCCESS_TEST: STATUS=$(curl -s -k -o /dev/null -w '\''%%{http_code}'\'' -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s "$URL"); [[ "$STATUS" =~ ^3[0-9][0-9]$ ]]\n' \
-        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)"
-}
-
-# emit_oracle_api — API/JSON-class oracles.
-# Fail = 4xx JSON. Success = 200 JSON (often with "token" or "success":true).
-emit_oracle_api() {
-    echo "ORACLE_HYDRA: S=\"token\""
-    echo "ORACLE_FFUF: -mc 200"
-    printf 'ORACLE_CURL_SUCCESS_TEST: [ "$(curl -s -k -o /dev/null -w '\''%%{http_code}'\'' -X POST -H '\''User-Agent: %s'\'' -H '\''Referer: %s'\'' -H '\''Origin: %s'\''%s --data-urlencode "%s=$U" --data-urlencode "%s=$P"%s "$URL")" = "200" ]\n' \
-        "$BROWSER_UA" "$REFERER" "$ORIGIN" "$(emit_hdr_flags)" "$USER_FIELD" "$PASS_FIELD" "$(emit_data_flags)"
 }
 
 # emit_oracle_basic — BASIC-class routing marker. No oracles.
@@ -637,14 +651,16 @@ dispatch() {
             ;;
         content)
             emit_metadata
-            derive_content_markers
-            emit_content_supplementary
-            emit_oracle_content
+            derive_fail_signature
+            emit_fail_supplementary
+            emit_oracle_body
             emit_summary
             ;;
         api)
             emit_metadata
-            emit_oracle_api
+            derive_fail_signature
+            emit_fail_supplementary
+            emit_oracle_body
             emit_summary
             ;;
         basic)
