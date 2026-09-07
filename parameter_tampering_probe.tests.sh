@@ -1,5 +1,5 @@
 #!/bin/bash
-# parameter_tampering_probe_tests.sh
+# parameter_tampering_probe.tests.sh
 #
 # Regression suite for parameter_tampering_probe.sh v1.
 #
