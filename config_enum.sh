@@ -20,12 +20,29 @@
 # Output markers:
 #   CONFIG_CRED[<file>]: <line>   - credential pattern hit (one per matched line,
 #                                    grep-prefixed with line number)
-#   CONFIG_FOUND: <file>          - readable file with no regex match
-#                                   (informational only; not an action trigger.
-#                                    If a real engagement surfaces a missed pattern,
-#                                    update PATTERN below + add regression test in
-#                                    config_enum_tests.sh, then commit.)
 #   CONFIG_EMPTY                  - no readable config files found
+#
+# Silence when files are scanned but no matches surface is intentional: prompt
+# return signals script completion. CONFIG_FOUND was previously emitted per
+# scanned-no-match file for scan-complete telemetry but became noise-heavy on
+# real targets (100+ scanned files vs. handful of hits). If a real engagement
+# surfaces a missed pattern, update PATTERN below + add regression test in
+# config_enum_tests.sh, then commit.
+#
+# FP FILTER (Fix E, Sep 2026): the default master-PATTERN dispatch pipes grep
+# output through an awk post-filter that drops shipped-distro-template false
+# positives. Two structural signals:
+#   1. Commented line + value is empty / boolean / generic placeholder
+#      → shipped template comment (e.g. `#Password=`, `#password = true`).
+#   2. Uncommented line + value slot starts with `#`
+#      → shipped commented-out directive (e.g. `secret = # disable PBM`).
+# T31 (commented cred with real value) preserved: filter only drops when value
+# is empty/boolean/placeholder, so `# password = oldRealValue` still emits.
+# Uncommented placeholders (T30) preserved: axis-3 rule — lazy admin may use
+# `changeme` as a real password. Only commented lines get placeholder-filtered.
+# Filter applies only to the default dispatch (INI/YAML/JSON/PHP/XML/etc.).
+# Format-specific dispatches (.netrc, .htpasswd, .pgpass, .ovpn, fstab, .sh)
+# are not filtered — different FP profiles, none observed in target engagements.
 #
 # KNOWN LIMITATIONS (revisit if engagement surfaces a miss):
 #   - Multi-line YAML values (key on one line, value on next with indent) NOT matched.
@@ -526,7 +543,55 @@ for f in "${FILES[@]}"; do
             matches=$(grep -aniE "$FSTAB_PATTERN" "$f" 2>/dev/null)
             ;;
         *)
-            matches=$(grep -aniE "$PATTERN" "$f" 2>/dev/null)
+            # Default master PATTERN + Fix-E FP filter (see header block).
+            matches=$(grep -aniE "$PATTERN" "$f" 2>/dev/null | awk '
+            BEGIN {
+                # Drop patterns applied to trimmed value on commented lines only.
+                # Case-insensitive full-string match required.
+                #   Booleans: config toggles (e.g. `#password = true` means "enable password prompting")
+                #   Generic tokens: shipped template placeholders (foobar, changeme, etc.)
+                #   Template refs: ${VAR}, $VAR, <ANGLE_BRACKET_PLACEHOLDER>
+                drop_re = "^(foobar|changeme|example|password|passwd|secret|token|xxx+|your[_-]?(password|secret|token)|true|false|yes|no|0|1|<[^>]*>|\\$\\{[^}]*\\}|\\$[a-zA-Z_][a-zA-Z0-9_]*)$"
+            }
+            {
+                orig = $0
+                raw = $0
+                sub(/^[0-9]+:/, "", raw)   # strip grep -n prefix to inspect raw config line
+
+                is_commented = (raw ~ /^[[:space:]]*[#;]/)
+
+                # Value extraction: last = or : in the raw line. Robust for INI/YAML/JSON/PHP/URL
+                # forms; skips filter when neither present (XML element, PEM header, service token
+                # in prose) — those forms have no FP profile from our observations.
+                n = length(raw)
+                last_sep = 0
+                for (i = n; i >= 1; i--) {
+                    c = substr(raw, i, 1)
+                    if (c == "=" || c == ":") { last_sep = i; break }
+                }
+                if (last_sep == 0) { print orig; next }
+
+                value = substr(raw, last_sep + 1)
+                sub(/^[[:space:]]+/, "", value)
+                sub(/[[:space:]]+$/, "", value)
+
+                # Uncommented + value starts with # → shipped commented-out directive
+                if (!is_commented && substr(value, 1, 1) == "#") next
+
+                # Commented + empty/boolean/placeholder → shipped template
+                if (is_commented) {
+                    if (value == "") next
+                    unquoted = value
+                    first = substr(unquoted, 1, 1)
+                    last = substr(unquoted, length(unquoted), 1)
+                    if (first == "\"" && last == "\"") {
+                        unquoted = substr(unquoted, 2, length(unquoted) - 2)
+                    }
+                    if (tolower(unquoted) ~ drop_re) next
+                }
+
+                print orig
+            }')
             ;;
     esac
 
@@ -534,7 +599,6 @@ for f in "${FILES[@]}"; do
         while IFS= read -r line; do
             echo "CONFIG_CRED[$f]: $line"
         done <<< "$matches"
-    else
-        echo "CONFIG_FOUND: $f"
     fi
+    # CONFIG_FOUND suppressed (Fix E): playbook routes on absence of CONFIG_CRED.
 done

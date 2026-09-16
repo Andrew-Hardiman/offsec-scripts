@@ -88,7 +88,8 @@ assert_not_contains "$OUT" "CONFIG_CRED" "T1b: empty case emits no CONFIG_CRED"
 assert_not_contains "$OUT" "CONFIG_FOUND" "T1c: empty case emits no CONFIG_FOUND"
 teardown_fixture
 
-# T2: Config file exists but no cred patterns → CONFIG_FOUND
+# T2: Config file exists but no cred patterns → silent (Fix E: CONFIG_FOUND suppressed;
+# prompt return is the scan-complete signal, absence of CONFIG_CRED = no hits).
 setup_fixture
 mk_user u 1000 "$TESTDIR/home/u"
 cat > "$TESTDIR/etc/apache.conf" <<EOF
@@ -96,8 +97,8 @@ ServerName localhost
 DocumentRoot /var/www/html
 EOF
 OUT=$("$TESTDIR/config_enum.sh")
-assert_contains "$OUT" "CONFIG_FOUND: $TESTDIR/etc/apache.conf" "T2a: no-cred file emits CONFIG_FOUND"
-assert_not_contains "$OUT" "CONFIG_CRED" "T2b: no-cred file emits no CONFIG_CRED"
+assert_not_contains "$OUT" "CONFIG_CRED" "T2a: no-cred file emits no CONFIG_CRED"
+assert_not_contains "$OUT" "CONFIG_FOUND" "T2b: CONFIG_FOUND suppressed"
 teardown_fixture
 
 # T3: Config file with cred pattern → CONFIG_CRED including matched line
@@ -268,13 +269,13 @@ teardown_fixture
 # False positive controls (key-name boundary, suffix, prose)
 # ============================================================================
 
-# T21: password_field (metadata, NOT a cred)
+# T21: password_field (metadata, NOT a cred). Fix E: CONFIG_FOUND suppressed;
+# only assertion is no CONFIG_CRED (silent = correct).
 setup_fixture
 mk_user u 1000 "$TESTDIR/home/u"
 echo "password_field = userPassword" > "$TESTDIR/etc/app.conf"
 OUT=$("$TESTDIR/config_enum.sh")
-assert_contains "$OUT" "CONFIG_FOUND" "T21a: password_field emits FOUND not CRED"
-assert_not_contains "$OUT" "CONFIG_CRED" "T21b: password_field NOT matched"
+assert_not_contains "$OUT" "CONFIG_CRED" "T21: password_field NOT matched"
 teardown_fixture
 
 # T22: password_max_age (config, NOT a cred)
@@ -1035,15 +1036,18 @@ teardown_fixture
 # fstab CIFS/SMB mount creds
 # ============================================================================
 
-# T89: fstab enumerated at /etc (Tree-class 1 discovery)
+# T89: fstab enumerated at /etc (Tree-class 1 discovery). Fix E: CONFIG_FOUND
+# suppressed, so enumeration proof requires a cred-bearing line that surfaces via
+# CONFIG_CRED with the fstab path.
 setup_fixture
 mk_user u 1000 "$TESTDIR/home/u"
 cat > "$TESTDIR/etc/fstab" <<EOF
 UUID=abc / ext4 defaults 0 1
+//srv/share /mnt/s cifs username=t89enumUser,password=pw 0 0
 UUID=def none swap sw 0 0
 EOF
 OUT=$("$TESTDIR/config_enum.sh")
-assert_contains "$OUT" "$TESTDIR/etc/fstab" "T89: /etc/fstab enumerated"
+assert_contains "$OUT" "CONFIG_CRED[$TESTDIR/etc/fstab]" "T89: /etc/fstab enumerated (proved via CONFIG_CRED emission)"
 teardown_fixture
 
 # T90: username= matches (positive — CIFS auth user)
@@ -1392,6 +1396,189 @@ mk_user u 1000 "$TESTDIR/home/u"
 echo "password=t122SubstringTrap" > "$TESTDIR/etc/apache.conf.baksomething"
 OUT=$("$TESTDIR/config_enum.sh")
 assert_not_contains "$OUT" "t122SubstringTrap" "T122: substring trap .baksomething NOT matched"
+teardown_fixture
+
+# ============================================================================
+# Fix E (Sep 2026): FP filter for shipped-distro templates + CONFIG_FOUND suppression
+# Filter drops matches when:
+#   (a) commented line + value is empty/boolean/placeholder (shipped template)
+#   (b) uncommented line + value slot starts with # (shipped commented directive)
+# Preserved: T31 (commented real cred), T30 (uncommented placeholder), T28/T29 (uncommented empty).
+# ============================================================================
+
+# T123: commented empty value dropped (fwupd `#Password=` pattern)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "#Password=" > "$TESTDIR/etc/fwupd.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T123: commented empty value dropped"
+teardown_fixture
+
+# T124: commented boolean value dropped (sos `#password = true` pattern)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "#password = true" > "$TESTDIR/etc/sos.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T124: commented boolean value dropped"
+teardown_fixture
+
+# T125: commented boolean 'false' dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "; password = false" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T125: commented boolean 'false' dropped"
+teardown_fixture
+
+# T126: commented placeholder dropped (overlayroot `PASSWORD="foobar"` pattern)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo '#      $ MAPNAME="secure"; DEV="/dev/vdg"; PASSWORD="foobar"' > "$TESTDIR/etc/overlayroot.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T126: commented quoted 'foobar' placeholder dropped"
+teardown_fixture
+
+# T127: commented placeholder 'changeme' dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "#password = changeme" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T127: commented 'changeme' placeholder dropped"
+teardown_fixture
+
+# T128: commented template ref ${VAR} dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo '# db_password = ${DB_PASS}' > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T128: commented \${VAR} template ref dropped"
+teardown_fixture
+
+# T129: commented template ref $VAR dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo '# db_password = $DB_PASSWORD' > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T129: commented \$VAR template ref dropped"
+teardown_fixture
+
+# T130: commented angle-bracket placeholder <YOUR_PASSWORD_HERE> dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "# password = <YOUR_PASSWORD_HERE>" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T130: commented <PLACEHOLDER> dropped"
+teardown_fixture
+
+# T131: uncommented value slot starts with # dropped (openssl `secret = # disable PBM` pattern)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "secret = # disable PBM" > "$TESTDIR/etc/openssl.cnf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T131: uncommented value-slot-starts-with-# dropped"
+teardown_fixture
+
+# T132: T31 regression preserved — commented cred with real-looking value NOT dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "# password = OldButActiveSecret2019" > "$TESTDIR/etc/legacy.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "OldButActiveSecret2019" "T132: T31 regression — commented real cred still matched"
+teardown_fixture
+
+# T133: T30 regression preserved — uncommented placeholder still matched
+# (axis-3: lazy admin may leave 'changeme' as real password)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password = changeme" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "changeme" "T133: T30 regression — uncommented placeholder still matched"
+teardown_fixture
+
+# T134: T28 regression preserved — uncommented empty value still matched
+# (blank-password auth is a real finding)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "password = " > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "CONFIG_CRED" "T134: T28 regression — uncommented empty value still matched"
+teardown_fixture
+
+# T135: openssl.cnf-style pointer to key file preserved (uncommented, value has # but doesn't start with it)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo 'private_key = $dir/private/cakey.pem# The private key' > "$TESTDIR/etc/openssl.cnf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "cakey.pem" "T135: uncommented value with mid-string # (real pointer) preserved"
+teardown_fixture
+
+# T136: commented placeholder 'password' as literal value dropped (shipped template)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "# password = password" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T136: commented 'password = password' (self-name placeholder) dropped"
+teardown_fixture
+
+# T137: commented placeholder value with single trailing whitespace dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+printf "# password = changeme   \n" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T137: commented placeholder + trailing whitespace dropped"
+teardown_fixture
+
+# T138: commented '0' boolean-form dropped
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "#password = 0" > "$TESTDIR/etc/app.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_CRED" "T138: commented '0' boolean dropped"
+teardown_fixture
+
+# T139: commented cred with real value + trailing inline comment NOT dropped
+# (T31 shape with trailing note — realistic real-world form)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "# password = R3alValue2024 # deprecated Q4" > "$TESTDIR/etc/legacy.conf"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "R3alValue2024" "T139: commented real cred + trailing note preserved"
+teardown_fixture
+
+# T140: .htpasswd whole-file dispatch unaffected by Fix E filter
+# (filter only wired into default dispatch; format-specific unchanged)
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo 'admin:$apr1$xyz$hash' > "$TESTDIR/etc/.htpasswd"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "CONFIG_CRED" "T140: .htpasswd dispatch not affected by Fix E filter"
+teardown_fixture
+
+# T141: .netrc dispatch unaffected by Fix E filter
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "machine host login user password secret123" > "$TESTDIR/home/u/.netrc"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "secret123" "T141: .netrc dispatch not affected by Fix E filter"
+teardown_fixture
+
+# T142: fstab dispatch unaffected by Fix E filter
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "//srv/share /mnt/s cifs username=u,password=p 0 0" > "$TESTDIR/etc/fstab"
+OUT=$("$TESTDIR/config_enum.sh")
+assert_contains "$OUT" "CONFIG_CRED" "T142: fstab dispatch not affected by Fix E filter"
+teardown_fixture
+
+# T143: CONFIG_FOUND never emitted globally — verified across mixed hit/no-hit corpus
+setup_fixture
+mk_user u 1000 "$TESTDIR/home/u"
+echo "ServerName localhost" > "$TESTDIR/etc/apache.conf"    # no cred
+echo "password = realSecret" > "$TESTDIR/etc/my.cnf"        # cred
+echo "#Password=" > "$TESTDIR/etc/fwupd.conf"               # FP filtered
+OUT=$("$TESTDIR/config_enum.sh")
+assert_not_contains "$OUT" "CONFIG_FOUND" "T143a: CONFIG_FOUND never emitted"
+assert_contains "$OUT" "realSecret" "T143b: real cred still emitted in mixed corpus"
 teardown_fixture
 
 # ============================================================================
