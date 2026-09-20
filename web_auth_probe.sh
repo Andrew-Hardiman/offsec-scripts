@@ -78,6 +78,48 @@ set -u
 TIMEOUT_SEC=10   # Per-probe curl timeout
 MAX_REDIRS=10    # curl max redirect chain depth
 
+# ⚠️ DESIGN GAP — READ BEFORE ADDING MORE HARDCODED PATHS ⚠️
+#
+# Applies to LOGIN_PATHS, REGISTER_PATHS, FORGOT_PATHS.
+#
+# The hardcoded arrays cover common conventions (/login, /wp-login.php,
+# /admin, /user/login, etc.) and that coverage is valuable and must be
+# preserved. The gap is what they CANNOT cover: the infinite space of
+# app-specific auth-path locations at any depth, of any shape:
+#   - Nested with standard endpoint: /customer/login.php, /shop/signin
+#   - Custom path AS the endpoint: /customer, /portal, /admin-panel
+#   - Custom single-segment name: /mystore, /goto-auth, /enterprise
+#   - Nested with custom endpoint: /portal/access, /site/gateway
+#   - Anything else a developer typed
+#
+# Each addition to the arrays closes ONE location; the underlying gap
+# persists.
+#
+# If you are here for the SECOND OR SUBSEQUENT time to add a path after
+# a real-target miss, STOP. Adding more entries does not converge. Run the
+# canonical playbook audit procedure from Vault_Strategy.md against this
+# script — first-principles derivation, steelman every decision, enumerate
+# failure axes, adversarially try to break it, bidirectional diff against
+# the current script. The audit's job is to design ADDITIONAL complementary
+# discovery mechanisms alongside the hardcoded arrays, not to replace them.
+# Existing convention coverage must be preserved. Do NOT skip to a
+# pre-baked fix; the audit exists precisely to prevent that.
+#
+# Coupled WAC-side defect: WAC's unauth_paths_<host>.txt sub-routine
+# dispatches auth-shape paths to "4.1 / 4.2 / 4.3 Per-path processing",
+# but 4.1/4.2/4.3 are host-level discovery flows that probe hardcoded
+# arrays — they have no per-path mode to probe under a known base path
+# (e.g. discover /mystore, then probe /mystore/login, /mystore/signin).
+# The script needs a --base-path flag; WAC's sub-routine dispatch needs
+# an actual Per-path processing section to call. Separate defect from the
+# finite-list gap above; noted here because a comprehensive audit of the
+# discovery flow must address both.
+#
+# Same warning in Scripts_Index.md.
+#
+# History: /customers/login, /customer/login added Sep 2026 (THM Walking
+# An Application room miss). Warning added same session.
+
 # LOGIN paths: extensionless (modern framework routing), .php/.aspx/.jsp
 # variants (legacy stack), CMS-specific. Ordered for readability of output,
 # not detection priority (all paths probed regardless of order).
@@ -89,6 +131,7 @@ LOGIN_PATHS=(
     /user/login /users/sign_in
     /auth /account/login /account/signin
     /portal /portal/login
+    /customer/login /customers/login
     # PHP variants (very common in OSCP+ / CTF / legacy apps)
     /login.php /signin.php /admin.php
     # ASP.NET variants
